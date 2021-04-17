@@ -61,7 +61,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 如果不缓存log而是直接用rf.Log做检查，可能发生越界异常；
-	// 该处理协程可能会延迟，别的处理协程可能已经删除了部分log
+	// 因为该处理协程可能会被延迟，而别的处理协程可能已经删除了部分log
 	// 记录server当前的日志，用于日志匹配条件的检查；
 	var log []Entry
 
@@ -69,7 +69,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	ok := image.Update(func(i *Image) {
 		i.State = FOLLOWER
 		i.CurrentTerm = term
-		i.VotedFor = -1
+
+		// i.VotedFor = leaderID
 
 		// 在收到AE RPC时只要不是该LEADER的追随者，都应该转为FOLLOWER并放弃工作协程
 		// 该LEADER的追随者只用重置选举计时器即可
@@ -104,7 +105,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.ConflictIndex = len(log)
 		reply.ConflictTerm = -1
 		reply.Success = false
-		Debug(dAppend, "[%d] S%d Refuse <- S%d, PLI:%d, CLL:%d.", currentTerm, me, prevLogTerm, len(log), leaderID)
+		Debug(dAppend, "[%d] S%d Refuse <- S%d, PLI:%d, CLL:%d.", currentTerm, me, leaderID, prevLogIndex, len(log))
 
 		return
 	}
@@ -282,33 +283,38 @@ func aerpc(image Image, server int, args *AppendEntriesArgs, nextIndex, matchInd
 	// 更新peers的nextIndex、newMatchIndex
 	// 采用CAS的方式，保证并发情况下nextIndex、matchIndex的正确性
 	// 即使server的状态已经发生改变不再是leader，修改nextIndex、matchIndex也是无害的
-	if atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.nextIndex[server])), int64(nextIndex), int64(newNextIndex)) &&
+
+	if atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.nextIndex[server])), int64(nextIndex), int64(newNextIndex)) ||
 		atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.matchIndex[server])), int64(matchIndex), int64(newMatchIndex)) {
 		Debug(dAppend, "[%d] S%d Update M&N -> S%d, MI:%d, NI:%d", image.CurrentTerm, image.me, server, newMatchIndex, newNextIndex)
+		image.nextIndex[server] = newNextIndex
+		image.matchIndex[server] = newMatchIndex
 	}
 
 }
 
 // 计算commitIndex
 func (rf *Raft) caculateCommitIndex() {
-	matchIndex := math.MaxInt64
+
+	commitIndex := math.MaxInt64
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
+
 		// 计算matchIndex的下限，matchIndex最小为0
-		matchIndex = min(rf.matchIndex[i], matchIndex)
+		commitIndex = min(rf.matchIndex[i], commitIndex)
 	}
 
 	// len(rf.Log) 最小为1
-	for matchIndex < len(rf.Log) {
+	for commitIndex < len(rf.Log) {
 		// 统计接受到matchIndex处entry的server数目
 		count := 0
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
 			}
-			if rf.matchIndex[i] >= matchIndex {
+			if rf.matchIndex[i] >= commitIndex {
 				count++
 			}
 		}
@@ -318,26 +324,26 @@ func (rf *Raft) caculateCommitIndex() {
 			break
 		}
 
-		matchIndex++
+		commitIndex++
 	}
 
-	matchIndex--
-	if matchIndex < rf.lastApplied {
+	commitIndex--
+	if commitIndex < rf.lastApplied {
 		return
 	}
 
 	// 不会提交其它任期的entry
-	if rf.Log[matchIndex].Term != rf.CurrentTerm {
+	if rf.Log[commitIndex].Term != rf.CurrentTerm {
 		return
 	}
 
 	// 更新commitIndex
-	rf.commitIndex = matchIndex
+	rf.commitIndex = commitIndex
 
 	// 一边慢慢去提交就好了
 	go func() {
-		Debug(dCommit, "[%d] S%d Update CI:%d", rf.CurrentTerm, rf.me, matchIndex)
-		rf.commitCh <- matchIndex
+		Debug(dCommit, "[%d] S%d Update CI:%d", rf.CurrentTerm, rf.me, commitIndex)
+		rf.commitCh <- commitIndex
 	}()
 
 }
@@ -351,31 +357,25 @@ func (rf *Raft) SendAppendEntries(image Image) {
 			continue
 		}
 
-		go func(server int) {
+		// 只要server的状态不发生改变，这些数据就是有效的
+		var (
+			nextIndex    = rf.nextIndex[server]
+			matchIndex   = rf.matchIndex[server]
+			prevLogIndex = nextIndex - 1
+			prevLogTerm  = rf.Log[prevLogIndex].Term
+			entries      = append(rf.Log[:0:0], rf.Log[nextIndex:]...)
+		)
 
-			// 只要server的状态不发生改变，这些数据就是有效的
-			rf.mu.RLock()
+		args := &AppendEntriesArgs{
+			Term:         image.CurrentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			LeaderCommit: rf.commitIndex,
+			Log:          entries,
+		}
 
-			var (
-				nextIndex    = rf.nextIndex[server]
-				matchIndex   = rf.matchIndex[server]
-				prevLogIndex = nextIndex - 1
-				prevLogTerm  = rf.Log[prevLogIndex].Term
-				entries      = append(rf.Log[:0:0], rf.Log[nextIndex:]...)
-			)
-
-			args := &AppendEntriesArgs{
-				Term:         image.CurrentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
-				LeaderCommit: rf.commitIndex,
-				Log:          entries,
-			}
-			rf.mu.RUnlock()
-
-			aerpc(image, server, args, nextIndex, matchIndex, entries)
-		}(server)
+		go aerpc(image, server, args, nextIndex, matchIndex, entries)
 
 	}
 

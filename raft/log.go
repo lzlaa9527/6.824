@@ -63,20 +63,18 @@ func (l *RWLog) String() string {
 
 func (rf *Raft) commit() {
 
-	go func() {
-		for commitIndex := range rf.commitCh {
-			if rf.killed() {
-				return
-			}
-			for commitIndex >= rf.lastApplied {
-				rf.Log[rf.lastApplied].ApplyMsg.CommandValid = true // 提交的时候一定要设置CommandValid = true
-				rf.applyCh <- rf.Log[rf.lastApplied].ApplyMsg
-
-				al := rf.Log[rf.lastApplied].ApplyMsg
-				Debug(dCommit, "[*] S%d Commit Log[%d]{IN:%d, TE:%d, CO:%v}", rf.me, rf.lastApplied, al.CommandIndex, rf.Log[rf.lastApplied].Term, al.Command)
-				rf.lastApplied++
-			}
+	for commitIndex := range rf.commitCh {
+		if rf.killed() {
+			return
 		}
-	}()
+		for commitIndex >= rf.lastApplied {
+			rf.Log[rf.lastApplied].ApplyMsg.CommandValid = true // 提交的时候一定要设置CommandValid = true
+			rf.applyCh <- rf.Log[rf.lastApplied].ApplyMsg
+
+			al := rf.Log[rf.lastApplied].ApplyMsg
+			Debug(dCommit, "[*] S%d Commit Log[%d]{IN:%d, TE:%d, CO:%v}", rf.me, rf.lastApplied, al.CommandIndex, rf.Log[rf.lastApplied].Term, al.Command)
+			rf.lastApplied++
+		}
+	}
 
 }

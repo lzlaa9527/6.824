@@ -227,10 +227,14 @@ func (rf *Raft) sendRequestVote(image Image) {
 			continue
 		}
 		go func(server int) {
+			reply := new(RequestVoteReply)
+
 			if image.Done() {
+				// 使得votesCounter协程正常关闭，避免内存泄漏
+				// votesCounter 必须接受到足够的选票（无论是否有效的）才会关闭
+				replysCh <- reply
 				return
 			}
-			reply := new(RequestVoteReply)
 
 			Debug(dVote, "[%d] S%d RV -> S%d", image.CurrentTerm, rf.me, server)
 

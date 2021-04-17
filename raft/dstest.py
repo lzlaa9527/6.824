@@ -98,7 +98,7 @@ def print_results(results: Dict[str, Dict[str, StatsMeter]], timing=False):
 
 
 def run_test(test: str, race: bool, timing: bool):
-    test_cmd = ["go", "test", f"-run={test}"]
+    test_cmd = ["go", "test","-v", "-timeout=3m", f"-run={test}"]
     if race:
         test_cmd.append("-race")
     if timing:
@@ -144,7 +144,7 @@ def run_tests(
         print("[yellow]Running with the race detector\n[/yellow]")
 
     if verbose > 0:
-        print(f"[yellow] Verbosity level set to {verbose}[/yellow]")
+        print(f"[yellow]Verbosity level set to {verbose}[/yellow]")
         os.environ['VERBOSE'] = str(verbose)
 
     while True:

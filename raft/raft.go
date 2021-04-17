@@ -22,7 +22,6 @@ import (
 	"bytes"
 	"math/rand"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
@@ -47,9 +46,11 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted State
 	me        int                 // this peer's index into peers[]
-	dead      int32
 
-	mu sync.RWMutex // 计时器超时，server状态转变时，要申请写锁
+	dead chan signal
+
+	// 修改server状态时，要申请写锁
+	mu sync.RWMutex
 
 	// Image 存储server某个状态下的一个镜像，Image具有时效性，当server的状态发生更改,Image也可能会失效了。
 	//
@@ -169,26 +170,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
-
-	// for循环确保正常关闭server
-	for {
-		done := rf.Image.Update(func(i *Image) {
-			close(i.done)
-		})
-		if done {
-			return
-		}
-
-	}
-
-}
-
 func (rf *Raft) killed() bool {
 
-	return atomic.LoadInt32(&rf.dead) == 1
+	select {
+	case <-rf.done:
+		return true
+	default:
+		return false
+	}
 }
 
 const HEARTBEAT = 150 * time.Millisecond
@@ -197,12 +186,23 @@ func electionTime() time.Duration {
 	return time.Duration((rand.Intn(200))+250) * time.Millisecond
 }
 
+func (rf *Raft) Kill() {
+	close(rf.dead)
+}
+
 // 当计时器超时或者收到工作协程通知需要改变server状态时，更新server的image以及执行后续动作
 func (rf *Raft) ticker() {
+	defer func() {
+		rf.timer.Stop()
+	}()
 
 	for {
-
 		select {
+		case <-rf.dead:
+			Debug(dKill, "[%d] S%d Be Killed", rf.CurrentTerm, rf.me)
+			close(rf.done)
+			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
+			return
 		case f := <-rf.Image.update:
 			rf.mu.Lock()
 
@@ -218,7 +218,6 @@ func (rf *Raft) ticker() {
 			if rf.Image.State == LEADER {
 				rf.nextIndex = make([]int, len(rf.peers))
 				rf.matchIndex = make([]int, len(rf.peers))
-
 				for i := range rf.nextIndex {
 					rf.nextIndex[i] = len(rf.Log)
 				}
@@ -306,6 +305,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.dead = make(chan signal)
 	rf.Image = &Image{
 		update: make(chan func(*Image)),
 		done:   make(chan signal),
@@ -319,7 +319,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// 创建用来提交日志的协程
 	rf.commitCh = make(chan int)
-	rf.commit()
+	go rf.commit()
 
 	// start ticker goroutine to start elections
 	Debug(dTest, "[%d] S%d Start.", rf.CurrentTerm, rf.me)
