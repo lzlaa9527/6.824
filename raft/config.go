@@ -4,7 +4,7 @@ package raft
 // support for Raft tester.
 //
 // we will use the original config.go to test your code for grading.
-// so, while you can modify this code to help you debug, please
+// so, while you can update this code to help you debug, please
 // test with the original before submitting.
 //
 
@@ -101,7 +101,7 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 	return cfg
 }
 
-// shut down a Raft server but save its persistent state.
+// shut down a Raft server but save its persistent State.
 func (cfg *config) crash1(i int) {
 	cfg.disconnect(i)
 	cfg.net.DeleteServer(i) // disable client connections to the server.
@@ -112,7 +112,7 @@ func (cfg *config) crash1(i int) {
 	// a fresh persister, in case old instance
 	// continues to update the Persister.
 	// but copy old persister's content so that we always
-	// pass Make() the last persisted state.
+	// pass Make() the last persisted State.
 	if cfg.saved[i] != nil {
 		cfg.saved[i] = cfg.saved[i].Copy()
 	}
@@ -138,7 +138,7 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	v := m.Command
 	for j := 0; j < len(cfg.logs); j++ {
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
-			log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
+			log.Printf("%v: RWLog %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
@@ -152,7 +152,7 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	return err_msg, prevok
 }
 
-// applier reads message from apply ch and checks that they match the log
+// applier reads message from apply ch and checks that they match the RWLog
 // contents
 func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
 	for m := range applyCh {
@@ -177,12 +177,12 @@ func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
 
 const SnapShotInterval = 10
 
-// periodically snapshot raft state
+// periodically snapshot raft State
 func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 	lastApplied := 0
 	for m := range applyCh {
 		if m.SnapshotValid {
-			//DPrintf("Installsnapshot %v %v\n", m.SnapshotIndex, lastApplied)
+			// DPrintf("Installsnapshot %v %v\n", m.SnapshotIndex, lastApplied)
 			cfg.mu.Lock()
 			if cfg.rafts[i].CondInstallSnapshot(m.SnapshotTerm,
 				m.SnapshotIndex, m.Snapshot) {
@@ -198,7 +198,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 			}
 			cfg.mu.Unlock()
 		} else if m.CommandValid && m.CommandIndex > lastApplied {
-			//DPrintf("apply %v lastApplied %v\n", m.CommandIndex, lastApplied)
+			// DPrintf("apply %v lastApplied %v\n", m.CommandIndex, lastApplied)
 			cfg.mu.Lock()
 			err_msg, prevok := cfg.checkLogs(i, m)
 			cfg.mu.Unlock()
@@ -234,7 +234,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 // start or re-start a Raft.
 // if one already exists, "kill" it first.
 // allocate new outgoing port file names, and a new
-// state persister, to isolate previous instance of
+// State persister, to isolate previous instance of
 // this server. since we cannot really kill it.
 //
 func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
@@ -257,9 +257,9 @@ func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	cfg.mu.Lock()
 
 	// a fresh persister, so old instance doesn't overwrite
-	// new instance's persisted state.
+	// new instance's persisted State.
 	// but copy old persister's content so that we always
-	// pass Make() the last persisted state.
+	// pass Make() the last persisted State.
 	if cfg.saved[i] != nil {
 		cfg.saved[i] = cfg.saved[i].Copy()
 	} else {
@@ -386,7 +386,7 @@ func (cfg *config) checkOneLeader() int {
 		lastTermWithLeader := -1
 		for term, leaders := range leaders {
 			if len(leaders) > 1 {
-				cfg.t.Fatalf("term %d has %d (>1) leaders", term, len(leaders))
+				cfg.t.Fatalf("CurrentTerm %d has %d (>1) leaders", term, len(leaders))
 			}
 			if term > lastTermWithLeader {
 				lastTermWithLeader = term
@@ -401,7 +401,7 @@ func (cfg *config) checkOneLeader() int {
 	return -1
 }
 
-// check that everyone agrees on the term.
+// check that everyone agrees on the CurrentTerm.
 func (cfg *config) checkTerms() int {
 	term := -1
 	for i := 0; i < cfg.n; i++ {
@@ -410,7 +410,7 @@ func (cfg *config) checkTerms() int {
 			if term == -1 {
 				term = xterm
 			} else if term != xterm {
-				cfg.t.Fatalf("servers disagree on term")
+				cfg.t.Fatalf("servers disagree on CurrentTerm")
 			}
 		}
 	}
@@ -429,7 +429,7 @@ func (cfg *config) checkNoLeader() {
 	}
 }
 
-// how many servers think a log entry is committed?
+// how many servers think a RWLog entry is committed?
 func (cfg *config) nCommitted(index int) (int, interface{}) {
 	count := 0
 	var cmd interface{} = nil
@@ -520,6 +520,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 		}
 
+		// 找到了一个leader
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
@@ -527,7 +528,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
-					// committed
 					if cmd1 == cmd {
 						// and it was the command we submitted.
 						return index
@@ -578,7 +578,7 @@ func (cfg *config) end() {
 	}
 }
 
-// Maximum log size across all servers
+// Maximum RWLog size across all servers
 func (cfg *config) LogSize() int {
 	logsize := 0
 	for i := 0; i < cfg.n; i++ {
