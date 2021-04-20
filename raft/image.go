@@ -22,6 +22,13 @@ type Image struct {
 	*Raft
 }
 
+func (rf *Raft) GetImage() Image {
+	// rf.mu.RLock()
+	// defer rf.mu.RUnlock()
+	i := *rf.Image
+	return i
+}
+
 // 当在工作协程中发生如下事件时，工作协程会通知ticker协程执行act()更新server的状态并执行相应动作
 // 事件：收到新leader的AP RPC，投出自己的选票，获得足够的选票，发现自己的term落后了；
 //
@@ -54,8 +61,6 @@ func (image Image) Done() bool {
 		return false
 	}
 }
-
-
 
 // return currentTerm and whether this server
 // believes it is the leader.

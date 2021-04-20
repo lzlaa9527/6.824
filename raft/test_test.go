@@ -74,13 +74,13 @@ func TestReElection2A(t *testing.T) {
 	// be elected.
 	Debug(dTest, "[*] S%d disconnect", leader2)
 	cfg.disconnect(leader2)
-	Debug(dTest, "[*] S%d disconnect", (leader2 + 1) % servers)
+	Debug(dTest, "[*] S%d disconnect", (leader2+1)%servers)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
-	Debug(dTest, "[*] S%d connect", (leader2 + 1) % servers)
+	Debug(dTest, "[*] S%d connect", (leader2+1)%servers)
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
@@ -200,7 +200,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
-	Debug(dTest, "[*] S%d disconnect", (leader + 1) % servers)
+	Debug(dTest, "[*] S%d disconnect", (leader+1)%servers)
 	cfg.disconnect((leader + 1) % servers)
 
 	// the leader and remaining follower should be
@@ -213,7 +213,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
-	Debug(dTest, "[*] S%d connect", (leader + 1) % servers)
+	Debug(dTest, "[*] S%d connect", (leader+1)%servers)
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree
@@ -815,6 +815,7 @@ func TestUnreliableAgree2C(t *testing.T) {
 }
 
 func TestFigure8Unreliable2C(t *testing.T) {
+	t.Parallel()
 	servers := 5
 	cfg := make_config(t, servers, true, false)
 	defer cfg.cleanup()
@@ -845,6 +846,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
+			Debug(dTest, "[*] S%d - leader disconnect", leader)
 			cfg.disconnect(leader)
 			nup -= 1
 		}
@@ -852,14 +854,17 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
+				Debug(dTest, "[*] S%d - connect", s)
 				cfg.connect(s)
 				nup += 1
 			}
 		}
 	}
 
+	Debug(dError,"[*] S0 ======================== ")
 	for i := 0; i < servers; i++ {
 		if cfg.connected[i] == false {
+			Debug(dTest, "[*] S%d - connect", i)
 			cfg.connect(i)
 		}
 	}

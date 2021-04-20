@@ -38,11 +38,11 @@ const (
 )
 
 var debugStart time.Time
-var debug = 1
+var debug = 0
 
 // Retrieve the verbosity level from an environment variable
 func getVerbosity() int {
-	v := os.Getenv("VERBOSE")	// VERBOSE = 1打印Debug输出，否则不打印
+	v := os.Getenv("DEBUG")	// VERBOSE = 1打印Debug输出，否则不打印
 	level := 0
 	if v != "" {
 		var err error
@@ -56,7 +56,7 @@ func getVerbosity() int {
 
 func init() {
 	debugStart = time.Now()
-	debug = getVerbosity()
+	// debug = getVerbosity()
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 }
 

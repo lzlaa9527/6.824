@@ -42,6 +42,8 @@ const (
 	LEADER    int = iota
 )
 
+type signal struct{}
+
 type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted State
@@ -87,17 +89,15 @@ type Raft struct {
 	matchIndex []int
 }
 
-type signal struct{}
-
 //
 // save Raft's persistent State to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
+// 调用persist()时必须保证server的状态不会发生改变
 func (rf *Raft) persist() {
-
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
+	// rf.RWLog.mu.RLock()
+	// defer rf.RWLog.mu.RUnlock()
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -108,7 +108,7 @@ func (rf *Raft) persist() {
 
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	Debug(dPersist, "[%d] S%d Save State, VF:%d", rf.State, rf.me, rf.VotedFor)
+	Debug(dPersist, "[%d] S%d Save State, VF:%d, LEN:%d", rf.CurrentTerm, rf.me, rf.VotedFor, len(rf.Log))
 }
 
 //
@@ -127,9 +127,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// Your code here (2C).
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	if err := d.Decode(&rf.Log); err != nil {
-		Debug(dError, "S%d ReadPersist RWLog failed, err: %v", rf.me, err)
-	}
 
 	if err := d.Decode(&rf.CurrentTerm); err != nil {
 		Debug(dError, "S%d ReadPersist CurrentTerm failed, err: %v", rf.me, err)
@@ -138,6 +135,11 @@ func (rf *Raft) readPersist(data []byte) {
 	if err := d.Decode(&rf.VotedFor); err != nil {
 		Debug(dError, "S%d ReadPersist VoteFor failed, err: %v", rf.me, err)
 	}
+
+	if err := d.Decode(&rf.Log); err != nil {
+		Debug(dError, "S%d ReadPersist RWLog failed, err: %v", rf.me, err)
+	}
+
 }
 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -158,6 +160,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// 并发添加日志时申请logMu，确保index的正确性
 	rf.RWLog.mu.Lock()
 	defer rf.RWLog.mu.Unlock()
+
 	index = len(rf.Log)
 
 	rf.Log = append(rf.Log, Entry{
@@ -180,10 +183,38 @@ func (rf *Raft) killed() bool {
 	}
 }
 
-const HEARTBEAT = 150 * time.Millisecond
+const HEARTBEAT = 100 * time.Millisecond
 
 func electionTime() time.Duration {
-	return time.Duration((rand.Intn(200))+250) * time.Millisecond
+	d := rand.Intn(300) + 300
+	return time.Duration(d) * time.Millisecond
+}
+
+// 收到新LEADER的AE PRC、选举计时器到期、投出选票时才重置计时器
+func (rf *Raft) resetTimer() {
+	// 重置 re.timer.C
+	rf.timer.Stop()
+	if len(rf.timer.C) > 0 {
+		select {
+		case <-rf.timer.C:
+		default:
+		}
+	}
+
+	switch rf.State {
+	case FOLLOWER:
+		ELT := electionTime()
+		// 选举时间[200,450]ms
+		rf.timer.Reset(ELT)
+		Debug(dTimer, "[%d] S%d Convert FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
+	case CANDIDATE:
+		ELT := electionTime()
+		rf.timer.Reset(ELT)
+		Debug(dTimer, "[%d] S%d Convert CANDIDATE, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
+	case LEADER:
+		rf.timer.Reset(HEARTBEAT)
+		// rf.SendAppendEntries(*rf.Image)
+	}
 }
 
 func (rf *Raft) Kill() {
@@ -231,52 +262,35 @@ func (rf *Raft) ticker() {
 
 			rf.mu.Lock()
 
-			// 若server是leader, 当定时器超时时，不改变状态
-			if rf.State == LEADER {
-				rf.mu.Unlock()
-				break
-			} else {
+			if rf.State != LEADER {
+				// server是follower、candidate，定时器超时转为candidate
+				rf.State = CANDIDATE
+				rf.CurrentTerm++
+				rf.VotedFor = rf.me
+
 				// 只要计时器超时时server不是leader那就意味着需要更新server的Image
 				//
 				// 先关闭当前的Image再更新状态
-				// 其它工作协程监听到server状态更新之后，应该放弃手头的工作
+				// 其它工作协程监听到Image失效之后，应该放弃手头的工作
 				Debug(dTimer, "[%d] S%d Close image.done", rf.CurrentTerm, rf.me)
 				close(rf.Image.done)
 				rf.Image.done = make(chan signal)
 			}
 
-			// server是follower、candidate，定时器超时转为candidate
-			rf.State = CANDIDATE
-			rf.CurrentTerm++
-			rf.VotedFor = rf.me
+			// 重置计时器
+			rf.resetTimer()
 			rf.mu.Unlock()
 		}
 
-		// 在完成状态转变之前其它的工作协程都不能获得Image，所以这里加写锁
-
-		// 重置 re.timer.C
-		rf.timer.Stop()
-		if len(rf.timer.C) > 0 {
-			select {
-			case <-rf.timer.C:
-			default:
-			}
-		}
+		LLI := len(rf.RWLog.Log)
+		Debug(dTerm, "[%d] S%d {ST:%d VF:%d LLI:%d LLT:%d}", rf.CurrentTerm, rf.me, rf.State, rf.VotedFor, LLI-1, rf.Log[LLI-1].Term)
+		// 执行后续动作
 
 		// 下列操作中对server状态的读操作，都不会产生data-race
 		// 因为对server状态的写操作在当前协程内
-
 		switch rf.State {
 		case FOLLOWER:
-			ELT := electionTime()
-			// 选举时间[200,450]ms
-			rf.timer.Reset(ELT)
-			Debug(dTimer, "[%d] S%d Convert FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
 		case CANDIDATE:
-			ELT := electionTime()
-			rf.timer.Reset(ELT)
-			Debug(dTimer, "[%d] S%d Convert CANDIDATE, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
-
 			rf.sendRequestVote(*rf.Image)
 		case LEADER:
 
@@ -290,7 +304,7 @@ func (rf *Raft) ticker() {
 			// 	})
 			// 	Debug(dAppend, "[%d] S%d Append Entry. IN:%d, TE:%d", rf.CurrentTerm, rf.me, index, rf.Log[index].Term)
 			// }
-			rf.timer.Reset(HEARTBEAT)
+			// rf.timer.Reset(HEARTBEAT)
 			rf.SendAppendEntries(*rf.Image)
 		}
 	}
@@ -316,6 +330,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from State persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.timer = time.NewTimer(electionTime())
+	go rf.ticker()
 
 	// 创建用来提交日志的协程
 	rf.commitCh = make(chan int)
@@ -323,7 +338,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	Debug(dTest, "[%d] S%d Start.", rf.CurrentTerm, rf.me)
-	go rf.ticker()
 
 	return rf
 }

@@ -39,9 +39,8 @@ type AppendEntriesReply struct {
 //
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// 获取server当前状态的镜像，加锁是为了避免在复制过程中状态发生改变，产生不一致；（理论上，这是可能发生的）
-	rf.mu.RLock()
-	image := *rf.Image
-	rf.mu.RUnlock()
+
+	image := rf.GetImage()
 
 	var (
 		me          = rf.me
@@ -52,7 +51,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Valid = true
 	reply.Term = max(term, currentTerm) // 响应的term一定是较大值
-	Debug(dAppend, "[%d] S%d <- S%d AE.", currentTerm, me, leaderID)
+
+	LLI := len(image.RWLog.Log)
+	Debug(dAppend, "[%d] S%d {ST:%d VF:%d LLI:%d LLT:%d}", image.CurrentTerm, image.me, image.State, image.VotedFor, LLI-1, image.Log[LLI-1].Term)
+	Debug(dAppend, "[%d] S%d RECEIVE<- S%d AE,T:%d PLI:%d PLT:%d LEN:%d", currentTerm, me, leaderID, term, args.PrevLogIndex, args.PrevLogTerm, len(args.Log))
 
 	if term < currentTerm {
 		reply.Success = false
@@ -66,11 +68,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	var log []Entry
 
 	// 收到leader AE RPC，需要成为FOLLOWER并重置自己的计时器
-	ok := image.Update(func(i *Image) {
+	reply.Valid = image.Update(func(i *Image) {
 		i.State = FOLLOWER
 		i.CurrentTerm = term
 
-		// i.VotedFor = leaderID
+		i.VotedFor = leaderID
 
 		// 在收到AE RPC时只要不是该LEADER的追随者，都应该转为FOLLOWER并放弃工作协程
 		// 该LEADER的追随者只用重置选举计时器即可
@@ -84,12 +86,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		image = *i
 		log = i.RWLog.Log
 
-		Debug(dAppend, "[%d] S%d Convert FOLLOWER <- S%d, Append Entry.", term, me, leaderID)
+		Debug(dAppend, "[%d] S%d Convert FOLLOWER <- S%d, RESET TIME.", term, me, leaderID)
+
+		i.resetTimer() // 重置计时器
 	})
 
 	// server的状态已经发生了改变
-	if !ok {
-		reply.Valid = false
+	if !reply.Valid {
 		return
 	}
 
@@ -105,7 +108,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.ConflictIndex = len(log)
 		reply.ConflictTerm = -1
 		reply.Success = false
-		Debug(dAppend, "[%d] S%d Refuse <- S%d, PLI:%d, CLL:%d.", currentTerm, me, leaderID, prevLogIndex, len(log))
+		Debug(dAppend, "[%d] S%d Refuse <- S%d", currentTerm, me, leaderID)
 
 		return
 	}
@@ -121,7 +124,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// 如果server状态已经改变，上述数据是无效的
 		reply.Valid = !image.Done()
-		Debug(dAppend, "[%d] S%d Refuse <- S%d, PLT:%d, CLT:%d.", currentTerm, me, prevLogTerm, log[prevLogIndex].Term, leaderID)
+		Debug(dAppend, "[%d] S%d Refuse <- S%d", currentTerm, me, leaderID)
 		return
 	}
 
@@ -155,7 +158,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if commitIndex < newCommitIndex && atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&rf.commitIndex)), int64(commitIndex), int64(newCommitIndex)) {
 
 			// 通知commit协程提交日志
-			Debug(dCommit, "[%d] S%d Update  CI:%d <-S%d", currentTerm, me, newCommitIndex, leaderID)
+			// Debug(dCommit, "[%d] S%d Update  CI:%d <-S%d", currentTerm, me, newCommitIndex, leaderID)
 
 			// 一边去提交就好了
 			go func() {
@@ -166,6 +169,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 为了保证并发修改日志的正确性，这里申请日志写锁
 	rf.RWLog.mu.Lock()
+	// defer rf.persist()
 	i, j := prevLogIndex+1, 0
 	for ; i < len(rf.Log) && j < len(args.Log); i, j = i+1, j+1 {
 		if rf.Log[i].Term != args.Log[j].Term {
@@ -177,14 +181,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if j == len(args.Log) {
 		rf.RWLog.mu.Unlock()
 		rf.mu.RUnlock()
-		Debug(dAppend, "[%d] S%d Append1 <- S%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
+		// Debug(dAppend, "[%d] S%d Append1 <- S%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
 		return
 	}
 
 	// 出现冲突日志
 	if i < len(rf.Log) {
 		rf.Log = rf.Log[:i]
-		Debug(dAppend, "[%d] S%d Drop <- S%d, CLI:%d", currentTerm, me, leaderID, i)
+		// Debug(dAppend, "[%d] S%d Drop <- S%d, CLI:%d", currentTerm, me, leaderID, i)
 	}
 
 	// 追加剩余日志
@@ -192,17 +196,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.RWLog.mu.Unlock()
 	rf.mu.RUnlock()
-	Debug(dAppend, "[%d] S%d Append2 <- S%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
+	// Debug(dAppend, "[%d] S%d Append2 <- S%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
 
 }
 
 func aerpc(image Image, server int, args *AppendEntriesArgs, nextIndex, matchIndex int, entries []Entry) {
-
-	if image.Done() {
-		return
-	}
-
-	Debug(dAppend, "[%d] S%d AE -> S%d, PLI:%d, PLT:%d, CI:%d, LEN:%d", image.CurrentTerm, image.me, server, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, len(entries))
 
 	reply := new(AppendEntriesReply)
 	ok := image.peers[server].Call("Raft.AppendEntries", args, reply)
@@ -216,7 +214,9 @@ func aerpc(image Image, server int, args *AppendEntriesArgs, nextIndex, matchInd
 		return
 	}
 
-	// server应该转为follower
+	Debug(dAppend, "[%d] S%d AE <-REPLY S%d, V:%v S:%v CLI:%d, CLT:%d", image.CurrentTerm, image.me, server, reply.Valid, reply.Success, reply.ConflictIndex, reply.ConflictTerm)
+
+	// server应该转为follower，但不用重置计时器
 	if reply.Term > image.CurrentTerm {
 		image.Update(func(i *Image) {
 
@@ -230,7 +230,7 @@ func aerpc(image Image, server int, args *AppendEntriesArgs, nextIndex, matchInd
 			close(i.done)
 			// 使新Image生效
 			i.done = make(chan signal)
-
+			// i.resetTimer()
 		})
 		return
 	}
@@ -252,17 +252,27 @@ func aerpc(image Image, server int, args *AppendEntriesArgs, nextIndex, matchInd
 		if reply.ConflictTerm == -1 {
 			newNextIndex = reply.ConflictIndex
 		} else {
-			find := false
-			for i := args.PrevLogIndex; i >= matchIndex; i-- {
-				if log[i].Term == reply.ConflictTerm {
-					newNextIndex = i + 1
-					find = true
-					break
-				}
-			}
+			// find := false
+			//
+			// for i := args.PrevLogIndex; i >= reply.ConflictIndex; i-- {
+			//
+			// 	if log[i].Term == reply.ConflictTerm {
+			// 		newNextIndex = i + 1
+			// 		find = true
+			// 		break
+			// 	}
+			// }
+			//
+			// if !find {
+			// 	newNextIndex = reply.ConflictIndex
+			// }
+			newNextIndex = reply.ConflictIndex
 
-			if !find {
-				newNextIndex = reply.ConflictIndex
+			// 如果log[newNextIndex].Term != reply.ConflictTerm，
+			// 那么newNextIndex左边的日志也不可能与server的日志匹配
+			if log[newNextIndex].Term == reply.ConflictTerm {
+				for ; newNextIndex < args.PrevLogIndex && log[newNextIndex].Term == reply.ConflictTerm; newNextIndex++ {
+				}
 			}
 		}
 	} else {
@@ -276,6 +286,7 @@ func aerpc(image Image, server int, args *AppendEntriesArgs, nextIndex, matchInd
 		return
 	}
 
+	// 不需要更新nextIndex，matchIndex
 	if nextIndex == newNextIndex && matchIndex == newMatchIndex {
 		return
 	}
@@ -284,11 +295,9 @@ func aerpc(image Image, server int, args *AppendEntriesArgs, nextIndex, matchInd
 	// 采用CAS的方式，保证并发情况下nextIndex、matchIndex的正确性
 	// 即使server的状态已经发生改变不再是leader，修改nextIndex、matchIndex也是无害的
 
-	if atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.nextIndex[server])), int64(nextIndex), int64(newNextIndex)) ||
+	if atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.nextIndex[server])), int64(nextIndex), int64(newNextIndex)) &&
 		atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.matchIndex[server])), int64(matchIndex), int64(newMatchIndex)) {
 		Debug(dAppend, "[%d] S%d Update M&N -> S%d, MI:%d, NI:%d", image.CurrentTerm, image.me, server, newMatchIndex, newNextIndex)
-		image.nextIndex[server] = newNextIndex
-		image.matchIndex[server] = newMatchIndex
 	}
 
 }
@@ -296,62 +305,62 @@ func aerpc(image Image, server int, args *AppendEntriesArgs, nextIndex, matchInd
 // 计算commitIndex
 func (rf *Raft) caculateCommitIndex() {
 
-	commitIndex := math.MaxInt64
+	oldCommitIndex := int(atomic.LoadInt64((*int64)(unsafe.Pointer(&rf.commitIndex))))
+	newCommitIndex := math.MaxInt64
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
 
 		// 计算matchIndex的下限，matchIndex最小为0
-		commitIndex = min(rf.matchIndex[i], commitIndex)
+		newCommitIndex = max(rf.matchIndex[i], newCommitIndex)
 	}
 
 	// len(rf.Log) 最小为1
-	for commitIndex < len(rf.Log) {
+	for {
 		// 统计接受到matchIndex处entry的server数目
 		count := 0
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
 			}
-			if rf.matchIndex[i] >= commitIndex {
+			if rf.matchIndex[i] >= newCommitIndex {
 				count++
 			}
 		}
 
 		// 如果超过半数以上的server没有收到matchIndex处的entry，就不用往后找了
-		if count < len(rf.peers)/2 {
+		if count >= len(rf.peers)/2 {
 			break
 		}
 
-		commitIndex++
+		newCommitIndex--
 	}
 
-	commitIndex--
-	if commitIndex < rf.lastApplied {
+	if newCommitIndex < rf.lastApplied {
 		return
 	}
 
 	// 不会提交其它任期的entry
-	if rf.Log[commitIndex].Term != rf.CurrentTerm {
+	if rf.Log[newCommitIndex].Term != rf.CurrentTerm {
 		return
 	}
 
 	// 更新commitIndex
-	rf.commitIndex = commitIndex
-
-	// 一边慢慢去提交就好了
-	go func() {
-		Debug(dCommit, "[%d] S%d Update CI:%d", rf.CurrentTerm, rf.me, commitIndex)
-		rf.commitCh <- commitIndex
-	}()
+	if atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&rf.commitIndex)), int64(oldCommitIndex), int64(newCommitIndex)) {
+		// 一边慢慢去提交就好了
+		go func() {
+			Debug(dCommit, "[%d] S%d Update CI:%d", rf.CurrentTerm, rf.me, newCommitIndex)
+			rf.commitCh <- newCommitIndex
+		}()
+	}
 
 }
 
 func (rf *Raft) SendAppendEntries(image Image) {
 
 	rf.caculateCommitIndex()
-
+	Debug(dAppend, "[%d] S%d SEND AE RPC.", rf.CurrentTerm, rf.me)
 	for server := range rf.peers {
 		if server == rf.me {
 			continue

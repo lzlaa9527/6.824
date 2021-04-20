@@ -51,21 +51,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		candidateID = args.CandidateId
 	)
 
-	Debug(dVote, "[%d] S%d RV <- S%d", currentTerm, me, candidateID)
-
-	reply.ID = me
 	reply.Valid = true
 	// reply.term取较大值
 	reply.Term = max(term, currentTerm)
 
+	LLI := len(image.RWLog.Log)
+	Debug(dVote, "[%d] S%d {ST:%d VF:%d LLI:%d LLT:%d}", image.CurrentTerm, image.me, image.State, image.VotedFor, LLI-1, image.Log[LLI-1].Term)
+	Debug(dVote, "[%d] S%d RECEIVE<- S%d AE,T:%d PLI:%d PLT:%d", currentTerm, me, candidateID, term, args.LastLogIndex, args.LastLogTerm)
+
 	// 参选者的term过时了，投反对票
 	if term < currentTerm {
 		reply.VoteGranted = false // 通知CANDIATE更新自己的term
+
 		Debug(dVote, "[%d] S%d Refuse -> S%d, Old Term", currentTerm, me, candidateID)
 		return
 	}
 
-	// CANDIATE.term比较新，任何SERVER都应该更新自己的term；但是不一定会投票还应进行限制选举条件的检查
+	// CANDIDATE.term比较新，任何SERVER都应该更新自己的term；
+	// 但是不一定会投票还应进行限制选举条件的检查
 	if term > currentTerm {
 
 		reply.Valid = image.Update(func(i *Image) {
@@ -73,7 +76,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			// 设置新的Image
 			i.State = FOLLOWER
 			i.CurrentTerm = term
-			i.VotedFor = candidateID
+			i.VotedFor = -1
 
 			// 使之前的Image失效
 			close(i.done)
@@ -86,6 +89,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			lastLogIndex = len(rf.Log) - 1
 			lastLogTerm = rf.Log[lastLogIndex].Term
 			Debug(dVote, "[%d] S%d Convert FOLLOWER <- S%d, New Term", term, rf.me, candidateID)
+
 		})
 
 		// server状态发生了改变
@@ -101,18 +105,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 已经没有票了
 	if votedFor != -1 && votedFor != candidateID {
 		reply.VoteGranted = false
+
 		Debug(dVote, "[%d] S%d Refuse -> S%d, No Vote.", currentTerm, me, candidateID)
 		return
 	}
 
-	// 满足限制选举条件
+	// 满足限制选举条件，投出赞成票并重置计时器
 	// 1. 如果CANDIDATE的最后的日志条目Term更大，投票
 	// 2. 如果Term一样大，但是CANDIDATE的日志更长，投票
 	// 3. 如果CANDIDATE与FOLLOWER的日志一样新，也投票
 	if args.LastLogTerm > lastLogTerm || (args.LastLogIndex >= lastLogIndex && args.LastLogTerm == lastLogTerm) {
 		reply.VoteGranted = true
-
-		Debug(dVote, "[%d] S%d SAT -> S%d", currentTerm, me, candidateID)
 
 		// 注意赞成票只有在server状态没有发生改变时才有效
 		reply.Valid = image.Update(func(i *Image) {
@@ -125,7 +128,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			close(i.done)
 			// 使新Image生效
 			i.done = make(chan signal)
-			Debug(dVote, "[%d] S%d Vote -> S%d, New Entries.", currentTerm, me, candidateID)
+			Debug(dVote, "[%d] S%d VOTE -> S%d", currentTerm, me, candidateID)
+
+			// 接受到新LEADER的RV RPC，需要更新自己的VotedFor
+			// 此时需要进行持久化currentTerm、VotedFor
+			// 持久化VotedFor可以避免在一个term中FOLLOWER向两个CANDIDATE投票；
+			// 持久化currentTerm可以避免LEADER的term出现递减的情况
+			i.persist()
+
+			i.resetTimer() // 重置计时器
 		})
 		return
 	}
@@ -143,6 +154,7 @@ func votesCounter(image Image, repliesCh <-chan *RequestVoteReply) <-chan signal
 		for reply := range repliesCh {
 
 			n++ // 获得一张选票
+			Debug(dVote, "[%d] S%d Receive Vote <- S%d, V:%v GV:%v T:%d", image.CurrentTerm, image.me, reply.ID, reply.Valid, reply.VoteGranted, reply.Term)
 
 			// 如果server的状态已经发生改变，也不用统计票数了。
 			// 但是不能直接退出协程，不然向repliesCh发送选票的协程会被阻塞
@@ -151,12 +163,12 @@ func votesCounter(image Image, repliesCh <-chan *RequestVoteReply) <-chan signal
 			}
 			// 处理有效票
 			if reply.Valid {
+				Debug(dVote, "[%d] S%d <-REPLY S%d, V:%v GV:%v T:%d", image.CurrentTerm, image.me, reply.ID, reply.Valid, reply.VoteGranted, reply.Term)
 
 				// 获得一张反对票
 				if !reply.VoteGranted {
-
-					// server应该转为follower
 					if reply.Term > image.CurrentTerm {
+						// server应该转为follower
 						image.Update(func(i *Image) {
 
 							// 设置新的Image
@@ -170,8 +182,8 @@ func votesCounter(image Image, repliesCh <-chan *RequestVoteReply) <-chan signal
 							i.done = make(chan signal)
 							Debug(dTimer, "[%d] S%d Convert FOLLOWER <- S%d New Term.", i.CurrentTerm, i.me, reply.ID)
 
+							// i.resetTimer()
 						})
-						return
 					}
 					goto check
 				}
@@ -180,7 +192,7 @@ func votesCounter(image Image, repliesCh <-chan *RequestVoteReply) <-chan signal
 				votesCounter++
 
 				if votesCounter+1 > servers/2 {
-					// 通知ticker协程将servre的状态更新为leader
+					// 通知ticker协程将serve的状态更新为leader
 					image.Update(func(i *Image) {
 
 						// 设置新的Image
@@ -192,8 +204,8 @@ func votesCounter(image Image, repliesCh <-chan *RequestVoteReply) <-chan signal
 						i.done = make(chan signal)
 						Debug(dVote, "[%d] S%d Convert LEADER.", i.CurrentTerm, i.me)
 
+						i.resetTimer() // 重置计时器，设置心跳时间
 					})
-					return
 				}
 			}
 		check:
@@ -221,6 +233,8 @@ func (rf *Raft) sendRequestVote(image Image) {
 	// 先开启计票协程再开始选举
 	<-votesCounter(image, replysCh)
 
+	Debug(dVote, "[%d] S%d SEND RV RPC", image.CurrentTerm, rf.me)
+
 	// 开始选举
 	for server := range rf.peers {
 		if server == rf.me {
@@ -232,14 +246,14 @@ func (rf *Raft) sendRequestVote(image Image) {
 			if image.Done() {
 				// 使得votesCounter协程正常关闭，避免内存泄漏
 				// votesCounter 必须接受到足够的选票（无论是否有效的）才会关闭
+				reply.ID = server
 				replysCh <- reply
 				return
 			}
 
-			Debug(dVote, "[%d] S%d RV -> S%d", image.CurrentTerm, rf.me, server)
-
 			// 将选票结果发送给计票协程
 			rf.peers[server].Call("Raft.RequestVote", args, reply)
+			reply.ID = server
 
 			replysCh <- reply // 无论选票是否有效都要交给计票协程，目的是让计票协程能够正确返回
 		}(server)
