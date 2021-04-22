@@ -94,10 +94,11 @@ type Raft struct {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
-// 调用persist()时必须保证server的状态不会发生改变
+// persist 只要能够正确保存已经提交的日志条目，以及保证整个系统的term不会减小，就能保证正确性
+// 因此为了尽可能的减少persist的次数，只在日志提交前以及投赞成票之前进行持久化操作。
 func (rf *Raft) persist() {
-	// rf.RWLog.mu.RLock()
-	// defer rf.RWLog.mu.RUnlock()
+	rf.RWLog.mu.RLock()
+	defer rf.RWLog.mu.RUnlock()
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -108,7 +109,7 @@ func (rf *Raft) persist() {
 
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	Debug(dPersist, "[%d] S%d Save State, VF:%d, LEN:%d", rf.CurrentTerm, rf.me, rf.VotedFor, len(rf.Log))
+	Debug(dSnap, "[%d] S%d Save State, VF:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.String())
 }
 
 //
@@ -185,6 +186,7 @@ func (rf *Raft) killed() bool {
 
 const HEARTBEAT = 100 * time.Millisecond
 
+// 选举超时时间至少是心跳时间的3倍
 func electionTime() time.Duration {
 	d := rand.Intn(300) + 300
 	return time.Duration(d) * time.Millisecond
@@ -223,15 +225,13 @@ func (rf *Raft) Kill() {
 
 // 当计时器超时或者收到工作协程通知需要改变server状态时，更新server的image以及执行后续动作
 func (rf *Raft) ticker() {
-	defer func() {
-		rf.timer.Stop()
-	}()
 
 	for {
 		select {
 		case <-rf.dead:
 			Debug(dKill, "[%d] S%d Be Killed", rf.CurrentTerm, rf.me)
 			close(rf.done)
+			rf.timer.Stop()
 			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
 			return
 		case f := <-rf.Image.update:
@@ -240,11 +240,6 @@ func (rf *Raft) ticker() {
 			f(rf.Image)
 			rf.Image.did <- signal{} // 通知工作协程，update函数已执行
 
-			if rf.killed() {
-				Debug(dKill, "[%d] S%d Be killed.", rf.CurrentTerm, rf.me)
-				rf.mu.Unlock()
-				return
-			}
 			// 当server从其他状态变为leader时，初始化matchIndex、nextIndex
 			if rf.Image.State == LEADER {
 				rf.nextIndex = make([]int, len(rf.peers))
@@ -256,10 +251,6 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 
 		case <-rf.timer.C:
-			if rf.killed() {
-				return
-			}
-
 			rf.mu.Lock()
 
 			if rf.State != LEADER {
@@ -282,8 +273,8 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 		}
 
-		LLI := len(rf.RWLog.Log)
-		Debug(dTerm, "[%d] S%d {ST:%d VF:%d LLI:%d LLT:%d}", rf.CurrentTerm, rf.me, rf.State, rf.VotedFor, LLI-1, rf.Log[LLI-1].Term)
+		rf.persist()
+
 		// 执行后续动作
 
 		// 下列操作中对server状态的读操作，都不会产生data-race
@@ -294,7 +285,7 @@ func (rf *Raft) ticker() {
 			rf.sendRequestVote(*rf.Image)
 		case LEADER:
 
-			// leader 任其开始时添加一个空的日志条目 no-op 条目
+			// leader 任期开始时添加一个空的日志条目 no-op 条目
 			// if rf.Log[len(rf.Log)-1].Term != rf.CurrentTerm {
 			// 	index := len(rf.Log)
 			//

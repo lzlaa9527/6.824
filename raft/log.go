@@ -41,21 +41,7 @@ type RWLog struct {
 func (l *RWLog) String() string {
 	str := "["
 	for i := 0; i < len(l.Log); i++ {
-		command := l.Log[i].Command
-		var s = command
-		switch command.(type) {
-		case int:
-			break
-		case string:
-
-			n := len(command.(string))
-			if n <= 5 {
-				s = command
-			} else {
-				s = command.(string)[:3] + "..." + command.(string)[n-2:]
-			}
-		}
-		str += fmt.Sprintf("{%d, %d, %v},", l.Log[i].CommandIndex, l.Log[i].Term, s)
+		str += fmt.Sprintf("{%d, %d},", l.Log[i].CommandIndex, l.Log[i].Term)
 	}
 	str += "]"
 	return str
@@ -67,11 +53,6 @@ func (rf *Raft) commit() {
 		if rf.killed() {
 			return
 		}
-
-		// 在提交日志之前进行持久化，持久化过程中要避免server状态的转化
-		rf.mu.RLock()
-		rf.persist()
-		rf.mu.RUnlock()
 
 		Debug(dCommit, "[*] S%d Commit LA:%d, CI:%d", rf.me, rf.lastApplied, commitIndex)
 		for commitIndex >= rf.lastApplied {

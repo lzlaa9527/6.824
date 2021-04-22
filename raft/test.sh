@@ -5,11 +5,11 @@
 # -p 并发数
 # -n 执行次数
 # -v 打印输出
-python3 dstest.py -v  -p 15 -n 50 -o ./output TestPersist12C TestPersist22C TestPersist32C TestFigure82C TestUnreliableAgree2C TestFigure8Unreliable2C TestReliableChurn2C TestUnreliableChurn2C
+python dstest.py -v  -p 20 -n 500 -o ./output TestPersist12C TestPersist22C TestPersist32C TestFigure82C TestUnreliableAgree2C TestFigure8Unreliable2C TestReliableChurn2C TestUnreliableChurn2C
 
-python3 dstest.py -v  -p 15 -n 50 -o ./output TestFigure8Unreliable2C
+python dstest.py -v  -p 15 -n 50 -o ./output TestFigure8Unreliable2C
 
-python3 dslog.py
+python dslog.py
 
 InitialElection2A
 TestReElection2A

@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"math"
 	"sync/atomic"
 	"unsafe"
 )
@@ -49,11 +48,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		leaderID    = args.LeaderId
 	)
 
-	reply.Valid = true
+	reply.Valid = image.Done()
 	reply.Term = max(term, currentTerm) // 响应的term一定是较大值
 
-	LLI := len(image.RWLog.Log)
-	Debug(dAppend, "[%d] S%d {ST:%d VF:%d LLI:%d LLT:%d}", image.CurrentTerm, image.me, image.State, image.VotedFor, LLI-1, image.Log[LLI-1].Term)
 	Debug(dAppend, "[%d] S%d RECEIVE<- S%d AE,T:%d PLI:%d PLT:%d LEN:%d", currentTerm, me, leaderID, term, args.PrevLogIndex, args.PrevLogTerm, len(args.Log))
 
 	if term < currentTerm {
@@ -135,7 +132,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 要保证追加日志时server的状态没有发生改变，所以这里要加读锁
 	// 如果不加锁server状态可能发生改变，有可能删除其它leader添加的已提交的日志
 	rf.mu.RLock()
-
 	if image.Done() {
 		reply.Valid = false
 		rf.mu.RUnlock()
@@ -148,23 +144,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		leaderCommit := args.LeaderCommit
 		newCommitIndex := min(leaderCommit, prevLogIndex+len(args.Log))
 
-		// Debug(dCommit, "[%d] S%d rf.CI:%d, CI:%d, NCI:%d", currentTerm, me, rf.commitIndex, commitIndex, newCommitIndex)
-
 		// 判断commitIndex是否需要更新
 		var commitIndex int
 		commitIndex = int(atomic.LoadInt64((*int64)(unsafe.Pointer(&rf.commitIndex))))
 
-		// 只有在commitIndex < newCommitIndex时才更新；可以使用CAS是为了保证并发安全
+		// 只有在commitIndex < newCommitIndex时才更新；使用CAS是为了保证并发安全
 		if commitIndex < newCommitIndex && atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&rf.commitIndex)), int64(commitIndex), int64(newCommitIndex)) {
-
-			// 通知commit协程提交日志
-			// Debug(dCommit, "[%d] S%d Update  CI:%d <-S%d", currentTerm, me, newCommitIndex, leaderID)
 
 			// 一边去提交就好了
 			go func() {
+				// 通知commit协程提交日志
+				Debug(dCommit, "[%d] S%d Update  CI:%d <-S%d", currentTerm, me, newCommitIndex, leaderID)
 				rf.commitCh <- newCommitIndex
 			}()
 		}
+	}()
+
+	// 响应AE RPC之前要将添加的日志先持久化
+	defer func() {
+		rf.mu.RLock()
+		rf.persist()
+		rf.mu.RUnlock()
 	}()
 
 	// 为了保证并发修改日志的正确性，这里申请日志写锁
@@ -181,14 +181,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if j == len(args.Log) {
 		rf.RWLog.mu.Unlock()
 		rf.mu.RUnlock()
-		// Debug(dAppend, "[%d] S%d Append1 <- S%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
+		Debug(dAppend, "[%d] S%d Append1 <- S%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
 		return
 	}
 
 	// 出现冲突日志
 	if i < len(rf.Log) {
 		rf.Log = rf.Log[:i]
-		// Debug(dAppend, "[%d] S%d Drop <- S%d, CLI:%d", currentTerm, me, leaderID, i)
+		Debug(dAppend, "[%d] S%d Drop <- S%d, CLI:%d", currentTerm, me, leaderID, i)
 	}
 
 	// 追加剩余日志
@@ -196,7 +196,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.RWLog.mu.Unlock()
 	rf.mu.RUnlock()
-	// Debug(dAppend, "[%d] S%d Append2 <- S%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
+	Debug(dAppend, "[%d] S%d Append2 <- S%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
 
 }
 
@@ -230,7 +230,6 @@ func aerpc(image Image, server int, args *AppendEntriesArgs, nextIndex, matchInd
 			close(i.done)
 			// 使新Image生效
 			i.done = make(chan signal)
-			// i.resetTimer()
 		})
 		return
 	}
@@ -252,20 +251,6 @@ func aerpc(image Image, server int, args *AppendEntriesArgs, nextIndex, matchInd
 		if reply.ConflictTerm == -1 {
 			newNextIndex = reply.ConflictIndex
 		} else {
-			// find := false
-			//
-			// for i := args.PrevLogIndex; i >= reply.ConflictIndex; i-- {
-			//
-			// 	if log[i].Term == reply.ConflictTerm {
-			// 		newNextIndex = i + 1
-			// 		find = true
-			// 		break
-			// 	}
-			// }
-			//
-			// if !find {
-			// 	newNextIndex = reply.ConflictIndex
-			// }
 			newNextIndex = reply.ConflictIndex
 
 			// 如果log[newNextIndex].Term != reply.ConflictTerm，
@@ -302,23 +287,24 @@ func aerpc(image Image, server int, args *AppendEntriesArgs, nextIndex, matchInd
 
 }
 
-// 计算commitIndex
+// caculateCommitIndex 在leader发送心跳之前计算commitIndex
 func (rf *Raft) caculateCommitIndex() {
 
+	// 采用CAS的思想，更新commitIndex，如果在提交之前commitIndex发生改变，就放弃提交；
+	// 因此整个过程就没必要加锁了。
 	oldCommitIndex := int(atomic.LoadInt64((*int64)(unsafe.Pointer(&rf.commitIndex))))
-	newCommitIndex := math.MaxInt64
+	newCommitIndex := -1
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
 
-		// 计算matchIndex的下限，matchIndex最小为0
+		// 计算matchIndex的上限，加速计算出正确的commitIndex
 		newCommitIndex = max(rf.matchIndex[i], newCommitIndex)
 	}
 
-	// len(rf.Log) 最小为1
+	// 找到首个能提交的日志条目，更新commitIndex
 	for {
-		// 统计接受到matchIndex处entry的server数目
 		count := 0
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
@@ -329,7 +315,7 @@ func (rf *Raft) caculateCommitIndex() {
 			}
 		}
 
-		// 如果超过半数以上的server没有收到matchIndex处的entry，就不用往后找了
+		// 找到首个大多数server均接受的日志条目时就不用再向前找了
 		if count >= len(rf.peers)/2 {
 			break
 		}
@@ -341,7 +327,8 @@ func (rf *Raft) caculateCommitIndex() {
 		return
 	}
 
-	// 不会提交其它任期的entry
+	// 不能提交其它任期的entry
+	// Log 可能会发生数据冲突，但是不影响正确性；因为此时server一定是LEADER，他不会删除、修改自己的log
 	if rf.Log[newCommitIndex].Term != rf.CurrentTerm {
 		return
 	}

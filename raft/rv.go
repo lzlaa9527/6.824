@@ -55,8 +55,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// reply.term取较大值
 	reply.Term = max(term, currentTerm)
 
-	LLI := len(image.RWLog.Log)
-	Debug(dVote, "[%d] S%d {ST:%d VF:%d LLI:%d LLT:%d}", image.CurrentTerm, image.me, image.State, image.VotedFor, LLI-1, image.Log[LLI-1].Term)
 	Debug(dVote, "[%d] S%d RECEIVE<- S%d AE,T:%d PLI:%d PLT:%d", currentTerm, me, candidateID, term, args.LastLogIndex, args.LastLogTerm)
 
 	// 参选者的term过时了，投反对票
@@ -88,8 +86,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			image = *i
 			lastLogIndex = len(rf.Log) - 1
 			lastLogTerm = rf.Log[lastLogIndex].Term
-			Debug(dVote, "[%d] S%d Convert FOLLOWER <- S%d, New Term", term, rf.me, candidateID)
 
+			Debug(dVote, "[%d] S%d Convert FOLLOWER <- S%d, New Term", term, rf.me, candidateID)
 		})
 
 		// server状态发生了改变
@@ -134,12 +132,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			// 此时需要进行持久化currentTerm、VotedFor
 			// 持久化VotedFor可以避免在一个term中FOLLOWER向两个CANDIDATE投票；
 			// 持久化currentTerm可以避免LEADER的term出现递减的情况
-			i.persist()
 
 			i.resetTimer() // 重置计时器
 		})
-		return
 	}
+	Debug(dVote, "[%d] S%d Refuse VOTE -> S%d, Old Term", currentTerm, me, candidateID)
 }
 
 // 用来计票的工作协程
@@ -154,7 +151,6 @@ func votesCounter(image Image, repliesCh <-chan *RequestVoteReply) <-chan signal
 		for reply := range repliesCh {
 
 			n++ // 获得一张选票
-			Debug(dVote, "[%d] S%d Receive Vote <- S%d, V:%v GV:%v T:%d", image.CurrentTerm, image.me, reply.ID, reply.Valid, reply.VoteGranted, reply.Term)
 
 			// 如果server的状态已经发生改变，也不用统计票数了。
 			// 但是不能直接退出协程，不然向repliesCh发送选票的协程会被阻塞
@@ -181,8 +177,6 @@ func votesCounter(image Image, repliesCh <-chan *RequestVoteReply) <-chan signal
 							// 使新Image生效
 							i.done = make(chan signal)
 							Debug(dTimer, "[%d] S%d Convert FOLLOWER <- S%d New Term.", i.CurrentTerm, i.me, reply.ID)
-
-							// i.resetTimer()
 						})
 					}
 					goto check
