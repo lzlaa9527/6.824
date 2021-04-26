@@ -34,34 +34,38 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
+	// 这里加锁其他修改rf.log的协程就会被阻塞，因此保证lastLogIndex、lastLogTerm的一致性
 	rf.mu.RLock()
 	// 获取server当前状态的镜像
 	image := *rf.Image
 
-	// 这里加锁其他修改rf.log的协程就会被阻塞，因此保证lastLogIndex、lastLogTerm的一致性
-	lastLogIndex := len(rf.Log) - 1
-	lastLogTerm := rf.Log[lastLogIndex].Term
+	rf.RWLog.mu.RLock()
+	lastEntry := rf.RWLog.Log[len(rf.Log)-1]
+	rf.RWLog.mu.RUnlock()
+
 	rf.mu.RUnlock()
 
 	var (
-		currentTerm = image.CurrentTerm
-		term        = args.Term
-		votedFor    = image.VotedFor
-		me          = rf.me
-		candidateID = args.CandidateId
+		currentTerm  = image.CurrentTerm
+		term         = args.Term
+		votedFor     = image.VotedFor
+		me           = rf.me
+		candidateID  = args.CandidateId
+		lastLogIndex = lastEntry.Index
+		lastLogTerm  = lastEntry.Term
 	)
 
 	reply.Valid = true
 	// reply.term取较大值
 	reply.Term = max(term, currentTerm)
 
-	Debug(dVote, "[%d] S%d RECEIVE<- S%d AE,T:%d PLI:%d PLT:%d", currentTerm, me, candidateID, term, args.LastLogIndex, args.LastLogTerm)
+	Debug(dVote, "[%d] S%d RECEIVE<- S%d,T:%d LLI:%d LLT:%d", currentTerm, me, candidateID, term, args.LastLogIndex, args.LastLogTerm)
 
 	// 参选者的term过时了，投反对票
 	if term < currentTerm {
 		reply.VoteGranted = false // 通知CANDIATE更新自己的term
 
-		Debug(dVote, "[%d] S%d Refuse -> S%d, Old Term", currentTerm, me, candidateID)
+		Debug(dVote, "[%d] S%d REFUSE -> S%d, OLD TERM", currentTerm, me, candidateID)
 		return
 	}
 
@@ -84,10 +88,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			// 接下来还需要进行限制选举条件的检查
 			// 所以要同步更新当前的image状态
 			image = *i
-			lastLogIndex = len(rf.Log) - 1
-			lastLogTerm = rf.Log[lastLogIndex].Term
 
-			Debug(dVote, "[%d] S%d Convert FOLLOWER <- S%d, New Term", term, rf.me, candidateID)
+			Debug(dVote, "[%d] S%d CONVERT FOLLOWER <- S%d, NEW TERM", term, rf.me, candidateID)
 		})
 
 		// server状态发生了改变
@@ -104,7 +106,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if votedFor != -1 && votedFor != candidateID {
 		reply.VoteGranted = false
 
-		Debug(dVote, "[%d] S%d Refuse -> S%d, No Vote.", currentTerm, me, candidateID)
+		Debug(dVote, "[%d] S%d REFUSE -> S%d, NO VOTE.", currentTerm, me, candidateID)
 		return
 	}
 
@@ -135,8 +137,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 			i.resetTimer() // 重置计时器
 		})
+		return
 	}
-	Debug(dVote, "[%d] S%d Refuse VOTE -> S%d, Old Term", currentTerm, me, candidateID)
+	Debug(dVote, "[%d] S%d REFUSE VOTE -> S%d, Old LOG", currentTerm, me, candidateID)
 }
 
 // 用来计票的工作协程
@@ -176,7 +179,7 @@ func votesCounter(image Image, repliesCh <-chan *RequestVoteReply) <-chan signal
 							close(i.done)
 							// 使新Image生效
 							i.done = make(chan signal)
-							Debug(dTimer, "[%d] S%d Convert FOLLOWER <- S%d New Term.", i.CurrentTerm, i.me, reply.ID)
+							Debug(dTimer, "[%d] S%d CONVERT FOLLOWER <- S%d NEW TERM.", i.CurrentTerm, i.me, reply.ID)
 						})
 					}
 					goto check
@@ -196,7 +199,7 @@ func votesCounter(image Image, repliesCh <-chan *RequestVoteReply) <-chan signal
 						close(i.done)
 						// 使新Image生效
 						i.done = make(chan signal)
-						Debug(dVote, "[%d] S%d Convert LEADER.", i.CurrentTerm, i.me)
+						Debug(dVote, "[%d] S%d CONVERT LEADER.", i.CurrentTerm, i.me)
 
 						i.resetTimer() // 重置计时器，设置心跳时间
 					})
@@ -216,12 +219,15 @@ func (rf *Raft) sendRequestVote(image Image) {
 
 	replysCh := make(chan *RequestVoteReply)
 
-	n := len(rf.Log)
+	rf.RWLog.mu.RLock()
+	lastEntry := rf.RWLog.Log[len(rf.Log)-1]
+	rf.RWLog.mu.RUnlock()
+
 	args := &RequestVoteArgs{
 		Term:         image.CurrentTerm,
 		CandidateId:  rf.me,
-		LastLogIndex: n - 1,
-		LastLogTerm:  rf.Log[n-1].Term,
+		LastLogIndex: lastEntry.Index,
+		LastLogTerm:  lastEntry.Term,
 	}
 
 	// 先开启计票协程再开始选举
@@ -237,6 +243,7 @@ func (rf *Raft) sendRequestVote(image Image) {
 		go func(server int) {
 			reply := new(RequestVoteReply)
 
+			// 选举结束
 			if image.Done() {
 				// 使得votesCounter协程正常关闭，避免内存泄漏
 				// votesCounter 必须接受到足够的选票（无论是否有效的）才会关闭

@@ -4,7 +4,10 @@
     <file url="file://$PROJECT_DIR$/raft/20210421_162025/TestPersist12C_3.log" charset="GBK" />
     <file url="file://$PROJECT_DIR$/raft/output/TestPersist12C_1.log" charset="GBK" />
     <file url="file://$PROJECT_DIR$/raft/output/TestPersist12C_2.log" charset="GBK" />
+    <file url="file://$PROJECT_DIR$/raft/output/TestReliableChurn2C_223.log" charset="GBK" />
     <file url="file://$PROJECT_DIR$/raft/output/TestReliableChurn2C_308.log" charset="GBK" />
+    <file url="file://$PROJECT_DIR$/raft/output/TestSnapshotBasic2D_0.log" charset="GBK" />
+    <file url="file://$PROJECT_DIR$/raft/output/TestSnapshotInstall2D_0.log" charset="GBK" />
     <file url="file://$PROJECT_DIR$/raft/output/TestUnreliableChurn2C_67.log" charset="GBK" />
   </component>
 </project>

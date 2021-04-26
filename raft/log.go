@@ -16,51 +16,67 @@ import (
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
 //
+
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
 
 	// For 2D:
-	SnapshotValid bool
 	Snapshot      []byte
 	SnapshotTerm  int
 	SnapshotIndex int
+	SnapshotValid bool
 }
 
 type Entry struct {
 	ApplyMsg
-	Term int
+	Term  int
+	Index int
 }
 
+// 下标为0的日志条目一定是快照
 type RWLog struct {
-	mu  sync.RWMutex
-	Log []Entry
+	mu            sync.RWMutex
+	Log           []Entry // 如果当前的server有快照，那么快照一定是第一个日志条目
+	SnapshotIndex int     // 当前快照的LastIncludeIndex，是所有日志条目的索引的偏移量；初始化为0
 }
 
 func (l *RWLog) String() string {
 	str := "["
 	for i := 0; i < len(l.Log); i++ {
-		str += fmt.Sprintf("{%d, %d},", l.Log[i].CommandIndex, l.Log[i].Term)
+		str += fmt.Sprintf("{%d, %d},", l.Log[i].Index, l.Log[i].Term)
 	}
 	str += "]"
 	return str
 }
 
-func (rf *Raft) commit() {
+func (rf *Raft) applier() {
 
 	for commitIndex := range rf.commitCh {
 		if rf.killed() {
 			return
 		}
 
-		Debug(dCommit, "[*] S%d Commit LA:%d, CI:%d", rf.me, rf.lastApplied, commitIndex)
+		// rf.lastApplied 是递增的所以不会重复执行同一个日志条目
 		for commitIndex >= rf.lastApplied {
-			rf.Log[rf.lastApplied].ApplyMsg.CommandValid = true // 提交的时候一定要设置CommandValid = true
-			rf.applyCh <- rf.Log[rf.lastApplied].ApplyMsg
 
+			// 防止产生对rf.RWLog的读写冲突
+			rf.RWLog.mu.RLock()
+			snapshotIndex := rf.RWLog.SnapshotIndex
+
+			if rf.lastApplied < snapshotIndex {
+				rf.lastApplied = snapshotIndex
+				rf.RWLog.mu.RUnlock()
+				continue
+			}
+			Debug(dCommit, "[%d] S%d APPLY LA:%d, SI:%d", rf.CurrentTerm, rf.me, rf.lastApplied, snapshotIndex)
+			entry := &rf.Log[rf.lastApplied-snapshotIndex]
+			rf.RWLog.mu.RUnlock()
+
+			rf.applyCh <- entry.ApplyMsg
 			rf.lastApplied++
 		}
-	}
 
+	}
 }

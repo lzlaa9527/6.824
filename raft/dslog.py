@@ -21,7 +21,7 @@ TOPICS = {
     "CLNT": "#00813c",
     "TEST": "#fe2c79",
 
-    "WARN": "#d08341",
+    "PERS": "#d08341",
     "ERRO": "#fe2626",
     "TRCE": "#fe2626",
 }

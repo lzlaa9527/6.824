@@ -13,7 +13,7 @@ type logTopic string
 
 const (
 	dClient  logTopic = "CLNT" // [%d] S%d Append Entry, IN:%d, TE:%d - %v
-	dCommit  logTopic = "CMIT" // [%d] S%d commit Entry, LA:%d, CI:%d - %v
+	dCommit  logTopic = "CMIT" // [%d] S%d applier Entry, LA:%d, CI:%d - %v
 	dKill    logTopic = "KILL" // [%d] S%d was Killed.
 	dAppend  logTopic = "APET" // [%d] S%d Send AE RPC to S%d, PLI:%d, PLT:%d
 	dPersist logTopic = "PERS" // [%d] S%d Saved State, T:%d, VF:%d
@@ -38,7 +38,7 @@ const (
 )
 
 var debugStart time.Time
-var debug = 1
+var debug = 0
 
 // Retrieve the verbosity level from an environment variable
 func getVerbosity() int {

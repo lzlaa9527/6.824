@@ -23,8 +23,10 @@ type Image struct {
 }
 
 func (rf *Raft) GetImage() Image {
-	// rf.mu.RLock()
-	// defer rf.mu.RUnlock()
+
+	// 获取server当前状态的镜像，加锁是为了避免在复制过程中状态发生改变，产生不一致；（理论上，这是可能发生的）
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 	i := *rf.Image
 	return i
 }

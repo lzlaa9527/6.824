@@ -40,7 +40,7 @@
 # remove historical outputs
 rm test-*.log test-*.err tester
 
-RACE=-race
+# RACE=-race
 # RACE=-race
 
 if [ $# -eq 1 ] && [ "$1" = "--help" ]; then

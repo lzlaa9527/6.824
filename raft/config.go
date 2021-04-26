@@ -140,7 +140,7 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 			log.Printf("%v: RWLog %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
 			// some server has already committed a different value for this entry!
-			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
+			err_msg = fmt.Sprintf("applier index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
 		}
 	}
@@ -177,7 +177,7 @@ func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
 
 const SnapShotInterval = 10
 
-// periodically snapshot raft State
+// periodically _Snapshot raft State
 func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 	lastApplied := 0
 	for m := range applyCh {
@@ -190,8 +190,8 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 				r := bytes.NewBuffer(m.Snapshot)
 				d := labgob.NewDecoder(r)
 				var v int
-				if d.Decode(&v) != nil {
-					log.Fatalf("decode error\n")
+				if err := d.Decode(&v); err != nil {
+					log.Fatalf("decode error,err:%v\n", err)
 				}
 				cfg.logs[i][m.SnapshotIndex] = v
 				lastApplied = m.SnapshotIndex
@@ -454,7 +454,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 	return count, cmd
 }
 
-// wait for at least n servers to commit.
+// wait for at least n servers to applier.
 // but don't wait forever.
 func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 	to := 10 * time.Millisecond

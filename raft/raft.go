@@ -1,22 +1,5 @@
 package raft
 
-//
-// this is an outline of the API that raft must expose to
-// the service (or tester). see comments below for
-// each of these functions for more details.
-//
-// rf = Make(...)
-//   create a new Raft server.
-// rf.Start(command interface{}) (index, CurrentTerm, isleader)
-//   start agreement on a new RWLog entry
-// rf.GetState() (CurrentTerm, isLeader)
-//   ask a Raft for its current CurrentTerm, and whether it thinks it is leader
-// ApplyMsg
-//   each time a new entry is committed to the RWLog, each Raft peer
-//   should send an ApplyMsg to the service (or tester)
-//   in the same server.
-//
-
 import (
 	"6.824/labgob"
 	"bytes"
@@ -89,13 +72,6 @@ type Raft struct {
 	matchIndex []int
 }
 
-//
-// save Raft's persistent State to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-//
-// persist 只要能够正确保存已经提交的日志条目，以及保证整个系统的term不会减小，就能保证正确性
-// 因此为了尽可能的减少persist的次数，只在日志提交前以及投赞成票之前进行持久化操作。
 func (rf *Raft) persist() {
 	rf.RWLog.mu.RLock()
 	defer rf.RWLog.mu.RUnlock()
@@ -105,42 +81,56 @@ func (rf *Raft) persist() {
 
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VotedFor)
-	e.Encode(rf.Log)
+	e.Encode(rf.Log) // 这里包含日志条目与快照
+	state := w.Bytes()
 
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
-	Debug(dSnap, "[%d] S%d Save State, VF:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.String())
+	// 单独存储快照
+	w = new(bytes.Buffer)
+	e = labgob.NewEncoder(w)
+	e.Encode(rf.Log[0])
+	snapshot := w.Bytes()
+	rf.persister.SaveStateAndSnapshot(state, snapshot)
+	Debug(dPersist, "[%d] S%d SAVE STATE, VF:%d, SI:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.SnapshotIndex, rf.RWLog.String())
 }
 
 //
 // restore previously persisted State.
 //
-func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any State?
+func (rf *Raft) readPersist() {
+
+	// Your code here (2C).
+	// bootstrap without any State?
+	if rf.persister.RaftStateSize() == 0 {
 		rf.VotedFor = -1
 
+		// 占位符
 		rf.Log = append(rf.Log, Entry{
+			ApplyMsg: ApplyMsg{
+			},
 			Term: -1,
 		})
 		return
 	}
 
-	// Your code here (2C).
-	r := bytes.NewBuffer(data)
-	d := labgob.NewDecoder(r)
+	if rf.persister.RaftStateSize() > 0 {
+		state := rf.persister.ReadRaftState()
+		r := bytes.NewBuffer(state)
+		d := labgob.NewDecoder(r)
 
-	if err := d.Decode(&rf.CurrentTerm); err != nil {
-		Debug(dError, "S%d ReadPersist CurrentTerm failed, err: %v", rf.me, err)
+		if err := d.Decode(&rf.CurrentTerm); err != nil {
+			Debug(dError, "S%d Read CT failed, err:%v", rf.me, err)
+		}
+
+		if err := d.Decode(&rf.VotedFor); err != nil {
+			Debug(dError, "S%d Read VF failed, err:%v", rf.me, err)
+		}
+
+		if err := d.Decode(&rf.Log); err != nil {
+			Debug(dError, "S%d Read LOG failed, err:%v", rf.me, err)
+		}
+
+		rf.RWLog.SnapshotIndex = rf.Log[0].SnapshotIndex
 	}
-
-	if err := d.Decode(&rf.VotedFor); err != nil {
-		Debug(dError, "S%d ReadPersist VoteFor failed, err: %v", rf.me, err)
-	}
-
-	if err := d.Decode(&rf.Log); err != nil {
-		Debug(dError, "S%d ReadPersist RWLog failed, err: %v", rf.me, err)
-	}
-
 }
 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -162,16 +152,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.RWLog.mu.Lock()
 	defer rf.RWLog.mu.Unlock()
 
-	index = len(rf.Log)
+	index = len(rf.Log) + rf.RWLog.SnapshotIndex
 
 	rf.Log = append(rf.Log, Entry{
-		ApplyMsg: ApplyMsg{Command: command, CommandIndex: index},
+		ApplyMsg: ApplyMsg{Command: command, CommandIndex: index, CommandValid: true},
 		Term:     rf.CurrentTerm,
+		Index:    index,
 	})
 
-	Debug(dClient, "[%d] S%d Append Entry. IN:%d, TE:%d， CO:%v", rf.CurrentTerm, rf.me, index, rf.Log[index].Term, command)
+	Debug(dClient, "[%d] S%d APPEND ENTRY. IN:%d, TE:%d， CO:%v", rf.CurrentTerm, rf.me, index, rf.Log[index-rf.RWLog.SnapshotIndex].Term, command)
 
 	return index, term, isLeader
+}
+
+func (rf *Raft) Kill() {
+	close(rf.dead)
 }
 
 func (rf *Raft) killed() bool {
@@ -208,19 +203,15 @@ func (rf *Raft) resetTimer() {
 		ELT := electionTime()
 		// 选举时间[200,450]ms
 		rf.timer.Reset(ELT)
-		Debug(dTimer, "[%d] S%d Convert FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
+		Debug(dTimer, "[%d] S%d CONVERT FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
 	case CANDIDATE:
 		ELT := electionTime()
 		rf.timer.Reset(ELT)
-		Debug(dTimer, "[%d] S%d Convert CANDIDATE, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
+		Debug(dTimer, "[%d] S%d CONVERT CANDIDATE, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
 	case LEADER:
 		rf.timer.Reset(HEARTBEAT)
 		// rf.SendAppendEntries(*rf.Image)
 	}
-}
-
-func (rf *Raft) Kill() {
-	close(rf.dead)
 }
 
 // 当计时器超时或者收到工作协程通知需要改变server状态时，更新server的image以及执行后续动作
@@ -229,7 +220,7 @@ func (rf *Raft) ticker() {
 	for {
 		select {
 		case <-rf.dead:
-			Debug(dKill, "[%d] S%d Be Killed", rf.CurrentTerm, rf.me)
+			Debug(dKill, "[%d] S%d BE KILLED", rf.CurrentTerm, rf.me)
 			close(rf.done)
 			rf.timer.Stop()
 			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
@@ -244,9 +235,11 @@ func (rf *Raft) ticker() {
 			if rf.Image.State == LEADER {
 				rf.nextIndex = make([]int, len(rf.peers))
 				rf.matchIndex = make([]int, len(rf.peers))
+				rf.RWLog.mu.RLock()
 				for i := range rf.nextIndex {
-					rf.nextIndex[i] = len(rf.Log)
+					rf.nextIndex[i] = len(rf.Log) + rf.RWLog.SnapshotIndex
 				}
+				rf.RWLog.mu.RUnlock()
 			}
 			rf.mu.Unlock()
 
@@ -263,7 +256,7 @@ func (rf *Raft) ticker() {
 				//
 				// 先关闭当前的Image再更新状态
 				// 其它工作协程监听到Image失效之后，应该放弃手头的工作
-				Debug(dTimer, "[%d] S%d Close image.done", rf.CurrentTerm, rf.me)
+				Debug(dTimer, "[%d] S%d CLOSE image.done", rf.CurrentTerm, rf.me)
 				close(rf.Image.done)
 				rf.Image.done = make(chan signal)
 			}
@@ -319,16 +312,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 	rf.RWLog = &RWLog{Log: make([]Entry, 0)}
 	// initialize from State persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersist()
 	rf.timer = time.NewTimer(electionTime())
 	go rf.ticker()
 
 	// 创建用来提交日志的协程
 	rf.commitCh = make(chan int)
-	go rf.commit()
+	go rf.applier()
 
 	// start ticker goroutine to start elections
-	Debug(dTest, "[%d] S%d Start.", rf.CurrentTerm, rf.me)
+	Debug(dTest, "[%d] S%d START.", rf.CurrentTerm, rf.me)
 
 	return rf
 }
