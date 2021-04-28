@@ -33,8 +33,8 @@ type Raft struct {
 	// 修改server状态时，要申请写锁
 	mu sync.RWMutex
 
-	*Image	// server的状态:CurrentTerm、State、VotedFor
-	timer *time.Timer
+	*Image // server的状态:CurrentTerm、State、VotedFor
+	timer  *time.Timer
 
 	*RWLog // 并发安全的日志条目数组
 
@@ -66,21 +66,17 @@ func (rf *Raft) persist() {
 	e.Encode(rf.Log) // 这里包含日志条目与快照
 	state := w.Bytes()
 
-	// 单独存储快照
-	w = new(bytes.Buffer)
-	e = labgob.NewEncoder(w)
-	e.Encode(rf.Log[0])
-	snapshot := w.Bytes()
-	rf.persister.SaveStateAndSnapshot(state, snapshot)
-	Debug(dPersist, "[%d] S%d SAVE STATE, VF:%d, SI:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.SnapshotIndex, rf.RWLog.String())
+	rf.persister.SaveRaftState(state)
 }
 
 func (rf *Raft) readPersist() {
 
+	// Your code here (2C).
+	// bootstrap without any State?
 	if rf.persister.RaftStateSize() == 0 {
 		rf.VotedFor = -1
 
-		// 占位
+		// 占位符
 		rf.Log = append(rf.Log, Entry{
 			ApplyMsg: ApplyMsg{
 			},
@@ -105,8 +101,6 @@ func (rf *Raft) readPersist() {
 		if err := d.Decode(&rf.Log); err != nil {
 			Debug(dError, "S%d Read LOG failed, err:%v", rf.me, err)
 		}
-
-		rf.RWLog.SnapshotIndex = rf.Log[0].SnapshotIndex
 	}
 }
 
@@ -129,7 +123,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.RWLog.mu.Lock()
 	defer rf.RWLog.mu.Unlock()
 
-	index = len(rf.Log) + rf.RWLog.SnapshotIndex
+	index = len(rf.Log)
 
 	rf.Log = append(rf.Log, Entry{
 		ApplyMsg: ApplyMsg{Command: command, CommandIndex: index, CommandValid: true},
@@ -137,7 +131,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index:    index,
 	})
 
-	Debug(dClient, "[%d] S%d APPEND ENTRY. IN:%d, TE:%d， CO:%v", rf.CurrentTerm, rf.me, index, rf.Log[index-rf.RWLog.SnapshotIndex].Term, command)
+	Debug(dClient, "[%d] S%d APPEND ENTRY. IN:%d, TE:%d， CO:%v", rf.CurrentTerm, rf.me, index, rf.Log[index].Term, command)
 
 	return index, term, isLeader
 }
@@ -205,14 +199,15 @@ func (rf *Raft) ticker() {
 			if rf.Image.State == LEADER {
 				rf.nextIndex = make([]int, len(rf.peers))
 				rf.matchIndex = make([]int, len(rf.peers))
+
 				rf.RWLog.mu.RLock()
 				for i := range rf.nextIndex {
-					rf.nextIndex[i] = len(rf.Log) + rf.RWLog.SnapshotIndex
+					rf.nextIndex[i] = len(rf.Log)
 				}
 				rf.RWLog.mu.RUnlock()
+
 			}
 			rf.mu.Unlock()
-
 		case <-rf.timer.C:
 			rf.mu.Lock()
 			// 选举计时器超时，server的状态转化为CANDIDATE
@@ -235,22 +230,10 @@ func (rf *Raft) ticker() {
 		// 执行后续动作
 		// 在ticker协程中对状态的读操作不存在读写冲突，没有必要加锁
 		switch rf.State {
-		case FOLLOWER:
+		case FOLLOWER: // FOLLOWER等待选举计时器超时
 		case CANDIDATE:
 			rf.sendRequestVote()
 		case LEADER:
-
-			// leader 任期开始时添加一个空的日志条目 no-op 条目
-			// if rf.Log[len(rf.Log)-1].Term != rf.CurrentTerm {
-			// 	index := len(rf.Log)
-			//
-			// 	rf.Log = append(rf.Log, Entry{
-			// 		ApplyMsg: ApplyMsg{Command: nil, CommandIndex: index},
-			// 		Term:     rf.CurrentTerm,
-			// 	})
-			// 	Debug(dAppend, "[%d] S%d Append Entry. IN:%d, TE:%d", rf.CurrentTerm, rf.me, index, rf.Log[index].Term)
-			// }
-			// rf.timer.Reset(HEARTBEAT)
 			rf.SendAppendEntries()
 		}
 	}
@@ -266,9 +249,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.dead = make(chan signal)
-	// 创建用来提交日志的协程
 	rf.commitCh = make(chan int)
-
 	rf.Image = &Image{
 		update: make(chan func(*Image)),
 		done:   make(chan signal),
@@ -276,15 +257,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		Raft:   rf,
 	}
 	rf.RWLog = &RWLog{Log: make([]Entry, 0)}
-	// initialize from State persisted before a crash
 	rf.readPersist()
 	rf.timer = time.NewTimer(electionTime())
-
 	go rf.ticker()
 	go rf.applier()
 
-	// start ticker goroutine to start elections
 	Debug(dTest, "[%d] S%d START.", rf.CurrentTerm, rf.me)
-
 	return rf
 }

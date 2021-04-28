@@ -10,8 +10,8 @@ type RequestVoteArgs struct {
 type RequestVoteReply struct {
 	Term        int
 	VoteGranted bool
-	ID          int  // 投票人ID
-	Valid       bool // 当RPC失败，或者投票者在处理RV PRC过程中状态发生改变，置Invalid为false
+	ID          int  // 投票人ID，用作日志处理
+	Valid       bool // 当RPC失败或者投票者在处理RV PRC过程中状态发生改变，置Valid为false
 }
 
 //
@@ -138,7 +138,7 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 			// 如果server的状态已经发生改变，就不用继续处理了
 			// 但是不能直接退出协程，不然向replyCh发送选票的协程会被阻塞
 			if image.Done() {
-				goto check // 判断是否已经收到所有的选票
+				goto check	// 判断是否已经收到所有的选票
 			}
 
 			// 处理有效票

@@ -35,11 +35,10 @@ type Entry struct {
 	Index int
 }
 
-// 下标为0的日志条目一定是快照
+
 type RWLog struct {
 	mu            sync.RWMutex
 	Log           []Entry // 如果当前的server有快照，那么快照一定是第一个日志条目
-	SnapshotIndex int     // 当前快照的LastIncludeIndex，是所有日志条目的索引的偏移量；初始化为0
 }
 
 func (l *RWLog) String() string {
@@ -52,7 +51,6 @@ func (l *RWLog) String() string {
 }
 
 func (rf *Raft) applier() {
-
 	for commitIndex := range rf.commitCh {
 		if rf.killed() {
 			return
@@ -60,23 +58,9 @@ func (rf *Raft) applier() {
 
 		// rf.lastApplied 是递增的所以不会重复执行同一个日志条目
 		for commitIndex >= rf.lastApplied {
-
-			// 防止产生对rf.RWLog的读写冲突
-			rf.RWLog.mu.RLock()
-			snapshotIndex := rf.RWLog.SnapshotIndex
-
-			if rf.lastApplied < snapshotIndex {
-				rf.lastApplied = snapshotIndex
-				rf.RWLog.mu.RUnlock()
-				continue
-			}
-			Debug(dCommit, "[%d] S%d APPLY LA:%d, SI:%d", rf.CurrentTerm, rf.me, rf.lastApplied, snapshotIndex)
-			entry := &rf.Log[rf.lastApplied-snapshotIndex]
-			rf.RWLog.mu.RUnlock()
-
-			rf.applyCh <- entry.ApplyMsg
+			Debug(dCommit, "[%d] S%d APPLY LA:%d", rf.CurrentTerm, rf.me, rf.lastApplied)
+			rf.applyCh <- rf.Log[rf.lastApplied].ApplyMsg
 			rf.lastApplied++
 		}
-
 	}
 }

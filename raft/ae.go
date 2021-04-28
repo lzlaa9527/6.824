@@ -6,29 +6,22 @@ import (
 )
 
 type AppendEntriesArgs struct {
-	// Your data here (2A, 2B).
 	Term         int // leader's CurrentTerm
 	LeaderId     int // so follower can redirect clients
 	LeaderCommit int // leader's commitIndex
 
-	PrevLogIndex int // index of Log entry immediately preceding new ones
-	PrevLogTerm  int // CurrentTerm of prevLogIndex entry
-
-	// For snapshot
-	LastIncludeTerm  int
-	LastIncludeIndex int
-	Log              []Entry
-	Snapshot         bool // 是否包含Snapshot
+	PrevLogIndex int     // index of Log entry immediately preceding new ones
+	PrevLogTerm  int     // CurrentTerm of prevLogIndex entry
+	Log          []Entry // log entries
 }
 
 type AppendEntriesReply struct {
-	// Your data here (2A).
-
-	Valid bool
+	Valid bool // Valid=true表示有效响应，否则表示无效响应
 
 	Term    int
 	Success bool
 
+	// 为了加快日志的back up，《students' guide》的优化
 	ConflictIndex int
 	ConflictTerm  int
 }
@@ -81,61 +74,45 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// LEADER发来不含快照的日志
-	if !args.Snapshot {
+	// 避免对rf.Log的读写冲突，但并不能保证server的状态不会发生改变
+	rf.RWLog.mu.RLock()
+	var (
+		prevLogIndex = args.PrevLogIndex
+		prevLogTerm  = args.PrevLogTerm
+	)
 
-		// 避免对rf.Log的读写冲突，这里并不能保证server的状态不会发生改变
-		rf.RWLog.mu.RLock()
-		var (
-			prevLogIndex = args.PrevLogIndex
-			prevLogTerm  = args.PrevLogTerm
-		)
-		// LEADER日志条目在FOLLOWER日志中的偏移位置
-		prevLogIndex -= rf.RWLog.SnapshotIndex
+	// 日志不匹配
+	if prevLogIndex >= len(rf.Log) {
+		reply.ConflictIndex = len(rf.Log)
+		reply.ConflictTerm = -1
+		reply.Success = false
 
-		// 不处理超时RPC中过时的日志
-		if prevLogIndex < 0 {
-			rf.RWLog.mu.RUnlock()
-			Debug(dAppend, "[%d] S%d REFUSE <- S%d, OLD LOG", currentTerm, me, leaderID)
-			reply.Valid = false
-			return
-		}
-
-		// 日志不匹配
-		if prevLogIndex >= len(rf.Log) {
-			reply.ConflictIndex = len(rf.Log)
-			reply.ConflictTerm = -1
-			reply.Success = false
-
-			Debug(dAppend, "[%d] S%d REFUSE <- S%d, CONFLICT", currentTerm, me, leaderID)
-			rf.RWLog.mu.RUnlock()
-
-			reply.Valid = !image.Done()
-			return
-		}
-
-		// 若RWLog[prevLogIndex].Term != prevLogTerm，需要找到ConflictIndex然后返回false
-		if prevLogTerm != rf.Log[prevLogIndex].Term {
-			reply.Success = false
-			reply.ConflictTerm = rf.Log[prevLogIndex].Term
-
-			// 找到首个term为ConflictTerm的ConflictIndex
-			for reply.ConflictIndex = prevLogIndex; rf.Log[reply.ConflictIndex].Term == reply.ConflictTerm; reply.ConflictIndex-- {
-			}
-
-			reply.ConflictIndex++
-			// ConflictIndex的绝对索引
-			reply.ConflictIndex += rf.RWLog.SnapshotIndex
-
-			rf.RWLog.mu.RUnlock()
-			Debug(dAppend, "[%d] S%d REFUSE <- S%d, CONFLICT", currentTerm, me, leaderID)
-
-			// 如果server状态已经改变，上述数据是无效的
-			reply.Valid = !image.Done()
-			return
-		}
+		Debug(dAppend, "[%d] S%d REFUSE <- S%d, CONFLICT", currentTerm, me, leaderID)
 		rf.RWLog.mu.RUnlock()
+
+		reply.Valid = !image.Done()
+		return
 	}
+
+	// RWLog[prevLogIndex].Term != prevLogTerm找到ConflictIndex然后返回false
+	if prevLogTerm != rf.Log[prevLogIndex].Term {
+		reply.Success = false
+		reply.ConflictTerm = rf.Log[prevLogIndex].Term
+
+		// 找到首个term为ConflictTerm的ConflictIndex
+		for reply.ConflictIndex = prevLogIndex; rf.Log[reply.ConflictIndex].Term == reply.ConflictTerm; reply.ConflictIndex-- {
+		}
+
+		reply.ConflictIndex++
+
+		rf.RWLog.mu.RUnlock()
+		Debug(dAppend, "[%d] S%d REFUSE <- S%d, CONFLICT", currentTerm, me, leaderID)
+
+		// 如果server状态已经改变，上述数据是无效的
+		reply.Valid = !image.Done()
+		return
+	}
+	rf.RWLog.mu.RUnlock()
 
 	// 通过了日志的一致性检查，开始追加日志
 	reply.Success = true
@@ -151,7 +128,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 添加日志后，可能需要更新commitIndex
-	// 这里不需要加锁，因为只要不减小commitIndex都是安全的; (减小commitIndex，可能让一条日志条目提交两次)
+	// 这里不需要加锁，因为只要不减小commitIndex都是安全的;
+	// (减小commitIndex，可能让一条日志条目提交两次)
 	defer func() {
 
 		var (
@@ -159,24 +137,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			newCommitIndex int
 		)
 
-		if !args.Snapshot {
-			newCommitIndex = min(leaderCommit, args.PrevLogIndex+len(args.Log))
-		} else {
-			newCommitIndex = min(leaderCommit, args.LastIncludeIndex+len(args.Log)-1)
-		}
+		newCommitIndex = min(leaderCommit, args.PrevLogIndex+len(args.Log))
 
 		// 判断commitIndex是否需要更新
 		var commitIndex int
 		commitIndex = int(atomic.LoadInt64((*int64)(unsafe.Pointer(&rf.commitIndex))))
 
 		// 因为申请了读锁，server的状态不会发生改变
-		// 只有在commitIndex < newCommitIndex时才更新保证了commitIndex的单调性，也保证了正确性
-		// 使用CAS是为了保证并发安全，否则可能覆盖别的协程提交的修改
+		// 只有在commitIndex < newCommitIndex时才更新；使用CAS是为了保证并发安全
 		if commitIndex < newCommitIndex && atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&rf.commitIndex)), int64(commitIndex), int64(newCommitIndex)) {
 
-			// 一边去提交就好了
+			// 一边去通知commit协程提交日志
 			go func() {
-				// 通知commit协程提交日志
 				Debug(dCommit, "[%d] S%d UPDATE  CI:%d <-S%d", currentTerm, me, newCommitIndex, leaderID)
 				rf.commitCh <- newCommitIndex
 			}()
@@ -192,35 +164,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.RWLog.mu.Lock()
 	defer rf.RWLog.mu.Unlock()
 
-	// i，j作为指针扫描FOLLOWER与LEADER的日志，检查是否存在冲突日志
-	i, j := args.PrevLogIndex-rf.RWLog.SnapshotIndex+1, 0 // AE RPC中不含快照
-
-	// 处理快照
-	if args.Snapshot {
-
-		lastIncludeIndex := args.LastIncludeIndex - rf.RWLog.SnapshotIndex
-
-		// 虽然LEADER的快照过时了但是随着快照发来的可能有新的日志条目应该被添加
-		// LEADER不改变状态的前提下，日志添加操作是幂等的，所以不会出错
-		if lastIncludeIndex < 0 {
-			// 从-lastIncludeIndex处扫描LEADER发来的日志，检查是否有可添加的日志
-			i, j = 0, -lastIncludeIndex
-		} else {
-			if lastIncludeIndex >= len(rf.Log) {
-				// FOLLOWER丢弃掉过时的所有日志
-				rf.Log = args.Log
-			} else {
-				// FOLLOWER压缩日志丢掉部分日志
-				log := make([]Entry, len(rf.Log[lastIncludeIndex:])) // 避免内存泄露
-				copy(log, rf.Log[lastIncludeIndex:])
-				rf.Log = log
-			}
-
-			// 接受了快照之后更新snapshotIndex；snapshotIndex是单调增加的
-			rf.RWLog.SnapshotIndex = args.LastIncludeIndex
-			i, j = 0, 0
-		}
-	}
+	// i，j作为指针扫描FOLLOWER与LEADER的日志，进行日志匹配条件的检查
+	i, j := args.PrevLogIndex+1, 0 // AE RPC中不含快照
 
 	for ; i < len(rf.Log) && j < len(args.Log); i, j = i+1, j+1 {
 
@@ -251,10 +196,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 // Aerpc 向标号为peerIndex的peer发送AE RPC，并处理后续响应
-// image		发送RPC时server的Image实例
-// nextIndex	发送RPC时peer的nextIndex值
-// matchIndex	发送RPC时peer的matchIndex值
-// args			RPC参数
+// image      发送RPC时server的Image实例
+// nextIndex   发送RPC时peer的nextIndex值
+// matchIndex  发送RPC时peer的matchIndex值
+// args          RPC参数
 func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEntriesArgs) {
 
 	reply := new(AppendEntriesReply)
@@ -292,17 +237,15 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 
 	// 日志匹配不成功
 	if !reply.Success {
-		image.RWLog.mu.RLock()
-		snapshotIndex := image.RWLog.SnapshotIndex
-		// nextIndex不能小于snapshotIndex，因为snapshot之前的日志已经被删除了
-		newNextIndex = max(reply.ConflictIndex, snapshotIndex)
+		image.RWLog.mu.RLock() // 避免对日志的读写冲突
+		newNextIndex = reply.ConflictIndex
+
 		// 如果reply.ConflictTerm != -1从日志中搜索和FOLLOWER可以匹配的日志条目
 		if reply.ConflictTerm != -1 {
-
-			// 如果image.Log[newNextIndex - snapshotIndex].Term != reply.ConflictTerm，
+			// 如果image.Log[newNextIndex].Term != reply.ConflictTerm，
 			// 那么newNextIndex左边的日志也不可能与FOLLOWER的日志匹配
-			if image.Log[newNextIndex-snapshotIndex].Term == reply.ConflictTerm {
-				for ; newNextIndex < args.PrevLogIndex && image.Log[newNextIndex-snapshotIndex].Term == reply.ConflictTerm; newNextIndex++ {
+			if image.Log[newNextIndex].Term == reply.ConflictTerm {
+				for ; newNextIndex < args.PrevLogIndex && image.Log[newNextIndex].Term == reply.ConflictTerm; newNextIndex++ {
 				}
 			}
 		}
@@ -327,13 +270,8 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 	}
 }
 
-// CalculateCommitIndex 在leader发送心跳之前计算commitIndex
 func (rf *Raft) calculateCommitIndex() {
 
-	// 采用CAS的思想，更新commitIndex，如果在提交之前commitIndex发生改变，就放弃提交；
-	// 因此整个过程就没必要加锁了。
-	// oldCommitIndex := int(atomic.LoadInt64((*int64)(unsafe.Pointer(&rf.commitIndex))))
-	// oldCommitIndex := rf.commitIndex
 	newCommitIndex := -1
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
@@ -363,10 +301,6 @@ func (rf *Raft) calculateCommitIndex() {
 		newCommitIndex--
 	}
 
-	// if newCommitIndex < rf.lastApplied {
-	// 	return
-	// }
-
 	// 没必要更新commitIndex字段
 	if newCommitIndex <= rf.commitIndex {
 		return
@@ -374,7 +308,7 @@ func (rf *Raft) calculateCommitIndex() {
 
 	// 不能提交其它任期的entry
 	rf.RWLog.mu.RLock()
-	if rf.Log[newCommitIndex-rf.RWLog.SnapshotIndex].Term != rf.CurrentTerm {
+	if rf.Log[newCommitIndex].Term != rf.CurrentTerm {
 		rf.RWLog.mu.RUnlock()
 		return
 	}
@@ -386,53 +320,38 @@ func (rf *Raft) calculateCommitIndex() {
 		Debug(dCommit, "[%d] S%d UPDATE CI:%d", rf.CurrentTerm, rf.me, newCommitIndex)
 		rf.commitCh <- newCommitIndex
 	}()
-
 }
 
 func (rf *Raft) SendAppendEntries() {
-	image := *rf.Image
+	image := *rf.Image        // 获取此时的Image实例
 	rf.calculateCommitIndex() // 更新commitIndex
 	Debug(dAppend, "[%d] S%d SEND AE RPC.", rf.CurrentTerm, rf.me)
-
 	for server := range rf.peers {
 		if server == rf.me {
 			continue
 		}
-		args := &AppendEntriesArgs{
-			Term:         image.CurrentTerm,
-			LeaderId:     rf.me,
-			LeaderCommit: rf.commitIndex,
-		}
+
 		// 记录下此时的nextIndex,matchIndex；
-		// 在收到RPC响应之后如果nextIndex,matchIndex发生改变，无需更新nextIndex,matchIndex
+		// 在收到RPC响应之后如果nextIndex,matchIndex发生改变，便无需更新nextIndex,matchIndex
 		var (
 			nextIndex  = rf.nextIndex[server]
 			matchIndex = rf.matchIndex[server]
 		)
 
-		rf.RWLog.mu.RLock()
-
-		snapshotIndex := rf.RWLog.SnapshotIndex
-		// 当nextIndex<=snapshotIndex时发送快照，
-		if nextIndex <= snapshotIndex {
-			nextIndex = snapshotIndex
-			rf.nextIndex[server] = nextIndex // 别忘了更新nextIndex
-
-			args.Snapshot = true
-			lastIncludeIndex := snapshotIndex
-			lastIncludeTerm := rf.Log[0].Term // 快照的下标是0
-
-			args.LastIncludeIndex = lastIncludeIndex
-			args.LastIncludeTerm = lastIncludeTerm
-			args.Log = append(rf.Log[:0:0], rf.Log[:]...)
-		} else {
-			prevLogIndex := nextIndex - 1
-			prevLogTerm := rf.Log[prevLogIndex-snapshotIndex].Term
-
-			args.PrevLogIndex = prevLogIndex
-			args.PrevLogTerm = prevLogTerm
-			args.Log = append(rf.Log[:0:0], rf.Log[nextIndex-snapshotIndex:]...)
+		// 每一peer都有一个独立的AppendEntriesArgs实例
+		args := &AppendEntriesArgs{
+			Term:         image.CurrentTerm,
+			LeaderId:     rf.me,
+			LeaderCommit: rf.commitIndex,
 		}
+
+		rf.RWLog.mu.RLock()
+		prevLogIndex := nextIndex - 1
+		prevLogTerm := rf.Log[prevLogIndex].Term
+
+		args.PrevLogIndex = prevLogIndex
+		args.PrevLogTerm = prevLogTerm
+		args.Log = append(rf.Log[:0:0], rf.Log[nextIndex:]...) // 深拷贝
 
 		rf.RWLog.mu.RUnlock()
 		go aerpc(image, server, nextIndex, matchIndex, args)
