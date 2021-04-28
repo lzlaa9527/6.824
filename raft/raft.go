@@ -36,6 +36,7 @@ type Raft struct {
 	*Image // server的状态:CurrentTerm、State、VotedFor
 	timer  *time.Timer
 
+
 	*RWLog // 并发安全的日志条目数组
 
 	commitIndex int
