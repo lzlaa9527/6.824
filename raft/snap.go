@@ -9,7 +9,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	defer rf.RWLog.mu.RUnlock()
 
 	// 不安装老旧的快照
-	if lastIncludedIndex < rf.RWLog.SnapshotIndex  {
+	if lastIncludedIndex < rf.RWLog.SnapshotIndex {
 		Debug(dSnap, "[%d] S%d REFUSE INSTALL - OLD SNAP, LII:%d, SI:%d", rf.CurrentTerm, rf.me, lastIncludedIndex, rf.RWLog.SnapshotIndex)
 		return false
 	}
@@ -23,7 +23,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its RWLog as much as possible.
 //
 // 更新LastIncludeIndex、删除过时的日志、持久化日志和快照
-func (rf *Raft) Snapshot(index int, snapshot []byte)  {
+func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 
 	// 防止rf.RWLog.SnapshotIndex的读写冲突
@@ -48,9 +48,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte)  {
 	// 首个日志条目用来存储snapshot
 	rf.Log[0] = Entry{
 		ApplyMsg: ApplyMsg{
-			CommandValid: false,
-			Command:      nil,
-
 			SnapshotValid: true,
 			Snapshot:      snapshot,
 			SnapshotTerm:  entries[0].Term,

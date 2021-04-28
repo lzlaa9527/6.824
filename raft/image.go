@@ -1,35 +1,24 @@
 package raft
 
-// Image记录server状态的一个镜像
-// 如果有工作协程发生某些事件需要更新server的状态，就向update中发送更新server状态的函数
-//
-// server状态更新后，可能会替换Image且原来的Image会失效；
+// Image 记录某一时刻 server 的状态；工作协程可以通过监听 Image 实例中的 done 管道
+// 判断 server 的状态是否改变，工作协程（在 update 函数中）通过关闭 done 管道以通知
+// 所有监听当前 Image 实例的工作协程放弃当前的任务；当工作协程需要更新 server 的状态，
+// 工作协程可以将 server 状态更新的方式通过 Image 实例中的update管道发送过去；ticker
+// 协程通过监听 update 管道，来执行 update 函数更新server的状态；当 ticker 协程执行
+// 完 update 函数之后，向 did 管道发送信号通知等待的工作协程；
 type Image struct {
-
-	// update用来通知ticker更新server状态
 	update chan func(i *Image)
 	did    chan signal
-	// 当server状态改变时，ticker协程会关闭done，通知工作协程放弃手头的工作
-	// 因此每个server的多个工作协程都要通过监听done判断server的状态是否改变
-	//
-	// ticker 只会关闭done一次；因为ticker协程关闭done之后会申请新的rf.Image
-	done chan signal
+	done   chan signal
 
-	// server 状态的镜像
+	// server 状态
 	CurrentTerm int
 	State       int
 	VotedFor    int
+	// Image所属的Raft实例
 	*Raft
 }
 
-func (rf *Raft) GetImage() Image {
-
-	// 获取server当前状态的镜像，加锁是为了避免在复制过程中状态发生改变，产生不一致；（理论上，这是可能发生的）
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	i := *rf.Image
-	return i
-}
 
 // 当在工作协程中发生如下事件时，工作协程会通知ticker协程执行act()更新server的状态并执行相应动作
 // 事件：收到新leader的AP RPC，投出自己的选票，获得足够的选票，发现自己的term落后了；
@@ -64,11 +53,4 @@ func (image Image) Done() bool {
 	}
 }
 
-// return currentTerm and whether this server
-// believes it is the leader.
-func (rf *Raft) GetState() (int, bool) {
-	// Your code here (2A).
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.CurrentTerm, rf.State == LEADER
-}
+
