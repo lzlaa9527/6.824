@@ -12,37 +12,27 @@ import (
 type logTopic string
 
 const (
-	dClient  logTopic = "CLNT" // [%d] S%d Append Entry, IN:%d, TE:%d - %v
-	dCommit  logTopic = "CMIT" // [%d] S%d applier Entry, LA:%d, CI:%d - %v
-	dKill    logTopic = "KILL" // [%d] S%d was Killed.
-	dAppend  logTopic = "APET" // [%d] S%d Send AE RPC to S%d, PLI:%d, PLT:%d
-	dPersist logTopic = "PERS" // [%d] S%d Saved State, T:%d, VF:%d
-	dTimer   logTopic = "TIMR" // [%d] S%d convert to , RE:%s
-	// [%d] S%d Append entries from S%d, PLI:%d, PLT:%d - CLI:%d, CLT:%d
-	// [%d] S%d Refuse AE RPC from S%d, TE:%d, CT:%d
-
-	dVote logTopic = "VOTE" // [%d] S%d Send RV RPC to S%d
-	// [%d] S%d Get vote from S%d, TVs:%d
-	// [%d] S%d Grant vote to S%d
-	// [%d] S%d Refuse RV RPC to S%d, RE:%s
-
-	dLog   logTopic = "LOG1"
-	dLog2  logTopic = "LOG2"
-	dSnap  logTopic = "SNAP"
-	dTerm  logTopic = "TERM"
-	dTest  logTopic = "TEST"
-	dTrace logTopic = "TRCE"
-	dError logTopic = "ERRO"
-
-	dWarn logTopic = "WARN"
+	dClient  logTopic = "CLNT" // 客户端请求
+	dCommit  logTopic = "CMIT" // 提交日志
+	dKill    logTopic = "KILL" // server宕机
+	dAppend  logTopic = "APET" // AE RPC
+	dPersist logTopic = "PERS" // 持久化操作
+	dTimer   logTopic = "TIMR" // 定时器操作
+	dVote    logTopic = "VOTE" // RV RPC
+	dSnap    logTopic = "SNAP" // 快照
+	dTerm    logTopic = "TERM" // 修改任期
+	dTest    logTopic = "TEST" // 测试信息
+	dTrace   logTopic = "TRCE"
+	dError   logTopic = "ERRO"
+	dWarn    logTopic = "WARN"
 )
 
 var debugStart time.Time
-var debug = 0
+var debug = 1
 
 // Retrieve the verbosity level from an environment variable
 func getVerbosity() int {
-	v := os.Getenv("DEBUG")	// VERBOSE = 1打印Debug输出，否则不打印
+	v := os.Getenv("DEBUG") // DEBUG = 1打印输出，否则不打印
 	level := 0
 	if v != "" {
 		var err error
@@ -56,7 +46,7 @@ func getVerbosity() int {
 
 func init() {
 	debugStart = time.Now()
-	// debug = getVerbosity()
+	debug = getVerbosity()
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 }
 

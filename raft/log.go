@@ -18,7 +18,7 @@ import (
 //
 
 type ApplyMsg struct {
-	CommandValid bool
+	CommandValid bool // true，该条目是日志条目
 	Command      interface{}
 	CommandIndex int
 
@@ -26,7 +26,7 @@ type ApplyMsg struct {
 	Snapshot      []byte
 	SnapshotTerm  int
 	SnapshotIndex int
-	SnapshotValid bool
+	SnapshotValid bool // true，该条目是快照
 }
 
 type Entry struct {
@@ -35,11 +35,10 @@ type Entry struct {
 	Index int
 }
 
-// 下标为0的日志条目一定是快照
 type RWLog struct {
 	mu            sync.RWMutex
 	Log           []Entry // 如果当前的server有快照，那么快照一定是第一个日志条目
-	SnapshotIndex int     // 当前快照的LastIncludeIndex，是所有日志条目的索引的偏移量；初始化为0
+	SnapshotIndex int     // 当前快照的LastIncludeIndex，所有日志条目索引的基准
 }
 
 func (l *RWLog) String() string {

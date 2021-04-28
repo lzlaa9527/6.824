@@ -1,15 +1,13 @@
 package raft
 
-//
-// A service wants to switch to _Snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the _Snapshot on applyCh.
-//
+// CondInstallSnapshot 如果lastIncludedIndex < rf.RWLog.SnapshotIndex，
+// 则该快照已经过时立即返回false；否则返回true。
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 	rf.RWLog.mu.RLock()
 	defer rf.RWLog.mu.RUnlock()
 
 	// 不安装老旧的快照
-	if lastIncludedIndex < rf.RWLog.SnapshotIndex  {
+	if lastIncludedIndex < rf.RWLog.SnapshotIndex {
 		Debug(dSnap, "[%d] S%d REFUSE INSTALL - OLD SNAP, LII:%d, SI:%d", rf.CurrentTerm, rf.me, lastIncludedIndex, rf.RWLog.SnapshotIndex)
 		return false
 	}
@@ -17,14 +15,8 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	return true
 }
 
-// the service says it has created a Snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the RWLog through (and including)
-// that index. Raft should now trim its RWLog as much as possible.
-//
-// 更新LastIncludeIndex、删除过时的日志、持久化日志和快照
-func (rf *Raft) Snapshot(index int, snapshot []byte)  {
-	// Your code here (2D).
+// Snapshot 更新rf.RWLog.SnapshotIndex、删除过时的日志并生成快照、持久化日志和快照
+func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	// 防止rf.RWLog.SnapshotIndex的读写冲突
 	rf.RWLog.mu.Lock()
@@ -48,9 +40,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte)  {
 	// 首个日志条目用来存储snapshot
 	rf.Log[0] = Entry{
 		ApplyMsg: ApplyMsg{
-			CommandValid: false,
-			Command:      nil,
-
 			SnapshotValid: true,
 			Snapshot:      snapshot,
 			SnapshotTerm:  entries[0].Term,
@@ -61,6 +50,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte)  {
 	}
 	rf.RWLog.mu.Unlock()
 
+	// 持久化日志和快照
 	rf.mu.RLock()
 	rf.persist()
 	rf.mu.RUnlock()

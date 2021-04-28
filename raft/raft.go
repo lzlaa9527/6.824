@@ -15,10 +15,6 @@ func init() {
 	rand.Seed(time.Now().Unix())
 }
 
-//
-// A Go object implementing a single Raft peer.
-//
-
 const (
 	FOLLOWER  int = iota
 	CANDIDATE int = iota
@@ -28,38 +24,17 @@ const (
 type signal struct{}
 
 type Raft struct {
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted State
-	me        int                 // this peer's index into peers[]
+	peers     []*labrpc.ClientEnd
+	persister *Persister
+	me        int
 
 	dead chan signal
 
 	// 修改server状态时，要申请写锁
 	mu sync.RWMutex
 
-	// Image 存储server某个状态下的一个镜像，Image具有时效性，当server的状态发生更改,Image也可能会失效了。
-	//
-	// 计时器超时以及某些事件可能改变server的状态，此时sever需要更新自己的状态以及执行一些列动作：
-	// 		如重置计时器、发起选举、发出心跳等；
-	//
-	// timer.C 	 		 用来监听计时器超时时间
-	// Image.Done() 	 用来监听其它的能改变server状态的事件
-	//
-	// 除了计时器超时外，改变server状态的事件有：
-	// 		收到leader的AP RPC，投出自己的选票，获得足够的选票，发现自己的term落后了；
-	// 其中需要注意的是除了收到新leader的AP RPC之外，上述事件发生时会使当前的Image失效，因此那些监听该
-	// Image的工作协程需要放弃手头的工作。
-	//
-	// 当server发生了上述事件时工作协程就通过Image的update管道通知ticker协程；工作协程会传送一个用来更新server
-	// 状态的update函数，如上所述部分update函数可能会使得当前的Image失效；ticker协程会执行该update函数，并执
-	// 行后续动作。
-	//
-	// 因此，每个工作协程在访问server的状态要先判断Image是否还有效，如果Image已失效就表示server的状态发生
-	// 改变应该放弃当前的工作；这样可以避免破坏一致性的修改；以及通过监听Image来判断server状态是否改变，也可
-	// 以减少申请rf.mu的争用。
-	//
-	*Image
-	timer *time.Timer
+	*Image // server的状态:CurrentTerm、State、VotedFor
+	timer  *time.Timer
 
 	*RWLog // 并发安全的日志条目数组
 
@@ -70,6 +45,13 @@ type Raft struct {
 
 	nextIndex  []int
 	matchIndex []int
+}
+
+func (rf *Raft) GetState() (int, bool) {
+	// Your code here (2A).
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	return rf.CurrentTerm, rf.State == LEADER
 }
 
 func (rf *Raft) persist() {
@@ -84,7 +66,8 @@ func (rf *Raft) persist() {
 	e.Encode(rf.Log) // 这里包含日志条目与快照
 	state := w.Bytes()
 
-	// 单独存储快照
+	// 测试代码的需要：单独存储快照
+	// 因为快照存储在Log中，因此不单独存储快照也可以
 	w = new(bytes.Buffer)
 	e = labgob.NewEncoder(w)
 	e.Encode(rf.Log[0])
@@ -93,17 +76,12 @@ func (rf *Raft) persist() {
 	Debug(dPersist, "[%d] S%d SAVE STATE, VF:%d, SI:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.SnapshotIndex, rf.RWLog.String())
 }
 
-//
-// restore previously persisted State.
-//
 func (rf *Raft) readPersist() {
 
-	// Your code here (2C).
-	// bootstrap without any State?
 	if rf.persister.RaftStateSize() == 0 {
 		rf.VotedFor = -1
 
-		// 占位符
+		// 占位
 		rf.Log = append(rf.Log, Entry{
 			ApplyMsg: ApplyMsg{
 			},
@@ -128,7 +106,7 @@ func (rf *Raft) readPersist() {
 		if err := d.Decode(&rf.Log); err != nil {
 			Debug(dError, "S%d Read LOG failed, err:%v", rf.me, err)
 		}
-
+		// 读取快照之后设置SnapshotIndex，如果没有快照SnapshotIndex=0
 		rf.RWLog.SnapshotIndex = rf.Log[0].SnapshotIndex
 	}
 }
@@ -172,7 +150,7 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 
 	select {
-	case <-rf.done:
+	case <-rf.dead:
 		return true
 	default:
 		return false
@@ -189,19 +167,15 @@ func electionTime() time.Duration {
 
 // 收到新LEADER的AE PRC、选举计时器到期、投出选票时才重置计时器
 func (rf *Raft) resetTimer() {
-	// 重置 re.timer.C
+	// 清空 re.timer.C
 	rf.timer.Stop()
 	if len(rf.timer.C) > 0 {
-		select {
-		case <-rf.timer.C:
-		default:
-		}
+		<-rf.timer.C
 	}
 
 	switch rf.State {
 	case FOLLOWER:
 		ELT := electionTime()
-		// 选举时间[200,450]ms
 		rf.timer.Reset(ELT)
 		Debug(dTimer, "[%d] S%d CONVERT FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
 	case CANDIDATE:
@@ -210,25 +184,22 @@ func (rf *Raft) resetTimer() {
 		Debug(dTimer, "[%d] S%d CONVERT CANDIDATE, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
 	case LEADER:
 		rf.timer.Reset(HEARTBEAT)
-		// rf.SendAppendEntries(*rf.Image)
 	}
 }
 
-// 当计时器超时或者收到工作协程通知需要改变server状态时，更新server的image以及执行后续动作
 func (rf *Raft) ticker() {
 
 	for {
 		select {
 		case <-rf.dead:
 			Debug(dKill, "[%d] S%d BE KILLED", rf.CurrentTerm, rf.me)
-			close(rf.done)
+			close(rf.done) // 通知所有的工作协程退出
 			rf.timer.Stop()
 			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
 			return
-		case f := <-rf.Image.update:
-			rf.mu.Lock()
-
-			f(rf.Image)
+		case f := <-rf.Image.update: // 工作协程通知ticker协程更新server状态
+			rf.mu.Lock()             // 更新server状态时申请写锁，避免读写冲突
+			f(rf.Image)              // 更新server状态，可能会重置计时器
 			rf.Image.did <- signal{} // 通知工作协程，update函数已执行
 
 			// 当server从其他状态变为leader时，初始化matchIndex、nextIndex
@@ -245,37 +216,29 @@ func (rf *Raft) ticker() {
 
 		case <-rf.timer.C:
 			rf.mu.Lock()
-
+			// 选举计时器超时，server的状态转化为CANDIDATE
 			if rf.State != LEADER {
-				// server是follower、candidate，定时器超时转为candidate
 				rf.State = CANDIDATE
 				rf.CurrentTerm++
 				rf.VotedFor = rf.me
-
-				// 只要计时器超时时server不是leader那就意味着需要更新server的Image
-				//
-				// 先关闭当前的Image再更新状态
-				// 其它工作协程监听到Image失效之后，应该放弃手头的工作
+				// server的状态发生改变，原来的Image虽之失效
 				Debug(dTimer, "[%d] S%d CLOSE image.done", rf.CurrentTerm, rf.me)
 				close(rf.Image.done)
 				rf.Image.done = make(chan signal)
 			}
-
 			// 重置计时器
 			rf.resetTimer()
 			rf.mu.Unlock()
 		}
-
+		// 改变状态之后需要持久化保存
 		rf.persist()
 
 		// 执行后续动作
-
-		// 下列操作中对server状态的读操作，都不会产生data-race
-		// 因为对server状态的写操作在当前协程内
+		// 在ticker协程中对状态的读操作不存在读写冲突，没有必要加锁
 		switch rf.State {
 		case FOLLOWER:
 		case CANDIDATE:
-			rf.sendRequestVote(*rf.Image)
+			rf.sendRequestVote()
 		case LEADER:
 
 			// leader 任期开始时添加一个空的日志条目 no-op 条目
@@ -289,7 +252,7 @@ func (rf *Raft) ticker() {
 			// 	Debug(dAppend, "[%d] S%d Append Entry. IN:%d, TE:%d", rf.CurrentTerm, rf.me, index, rf.Log[index].Term)
 			// }
 			// rf.timer.Reset(HEARTBEAT)
-			rf.SendAppendEntries(*rf.Image)
+			rf.SendAppendEntries()
 		}
 	}
 }
@@ -304,6 +267,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.dead = make(chan signal)
+	// 创建用来提交日志的协程
+	rf.commitCh = make(chan int)
+
 	rf.Image = &Image{
 		update: make(chan func(*Image)),
 		done:   make(chan signal),
@@ -314,10 +280,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from State persisted before a crash
 	rf.readPersist()
 	rf.timer = time.NewTimer(electionTime())
-	go rf.ticker()
 
-	// 创建用来提交日志的协程
-	rf.commitCh = make(chan int)
+	go rf.ticker()
 	go rf.applier()
 
 	// start ticker goroutine to start elections

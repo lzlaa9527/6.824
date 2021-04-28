@@ -12,7 +12,7 @@ python dstest.py -v  -p 15 -n 50 -o ./output TestFigure8Unreliable2C
 python dstest.py -v  -p 15 -n 50 -o ./output TestSnapshotInstall2D TestSnapshotInstallUnreliable2D TestSnapshotInstallCrash2D TestSnapshotInstallUnCrash2D
 
 
-python dstest.py -v  -p 15 -n 50 -o ./output InitialElection2A TestReElection2A TestManyElections2A BasicAgree2B RPCBytes2B FailAgree2B FailNoAgree2B ConcurrentStarts2B Rejoin2B Backup2B Count2B TestPersist12C TestPersist22C TestPersist32C TestFigure82C TestUnreliableAgree2C TestFigure8Unreliable2C TestReliableChurn2C TestUnreliableChurn2C TestSnapshotBasic2D TestSnapshotInstall2D TestSnapshotInstallUnreliable2D TestSnapshotInstallCrash2D TestSnapshotInstallUnCrash2D
+python dstest.py -v  -p 15 -n 10 -o ./output InitialElection2A TestReElection2A TestManyElections2A BasicAgree2B RPCBytes2B FailAgree2B FailNoAgree2B ConcurrentStarts2B Rejoin2B Backup2B Count2B TestPersist12C TestPersist22C TestPersist32C TestFigure82C TestUnreliableAgree2C TestFigure8Unreliable2C TestReliableChurn2C TestUnreliableChurn2C TestSnapshotBasic2D TestSnapshotInstall2D TestSnapshotInstallUnreliable2D TestSnapshotInstallCrash2D TestSnapshotInstallUnCrash2D
 
 InitialElection2A
 TestReElection2A
