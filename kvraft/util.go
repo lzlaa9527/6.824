@@ -1,0 +1,66 @@
+package raft
+
+import (
+	"fmt"
+	"log"
+	"math"
+	"os"
+	"strconv"
+	"time"
+)
+
+type logTopic string
+
+const (
+	dClient  logTopic = "CLNT" // 客户端请求
+	dCommit  logTopic = "CMIT" // 提交日志
+	dKill    logTopic = "KILL" // server宕机
+	dAppend  logTopic = "APET" // AE RPC
+	dPersist logTopic = "PERS" // 持久化操作
+	dTimer   logTopic = "TIMR" // 定时器操作
+	dVote    logTopic = "VOTE" // RV RPC
+	dSnap    logTopic = "SNAP" // 快照
+	dTerm    logTopic = "TERM" // 修改任期
+	dTest    logTopic = "TEST" // 测试信息
+	dTrace   logTopic = "TRCE"
+	dError   logTopic = "ERRO"
+	dWarn    logTopic = "WARN"
+)
+
+var debugStart time.Time
+var debug = 1
+
+// Retrieve the verbosity level from an environment variable
+func getVerbosity() int {
+	v := os.Getenv("DEBUG") // DEBUG = 1打印输出，否则不打印
+	level := 0
+	if v != "" {
+		var err error
+		level, err = strconv.Atoi(v)
+		if err != nil {
+			log.Fatalf("Invalid verbosity %v", v)
+		}
+	}
+	return level
+}
+
+func init() {
+	debugStart = time.Now()
+	debug = getVerbosity()
+	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
+}
+
+func Debug(topic logTopic, format string, a ...interface{}) {
+	if debug >= 1 {
+		time := time.Since(debugStart).Microseconds()
+		time /= 100
+		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
+		format = prefix + format
+		log.Printf(format, a...)
+
+	}
+}
+
+func min(a, b int) int { return int(math.Min(float64(a), float64(b))) }
+
+func max(a, b int) int { return int(math.Max(float64(a), float64(b))) }

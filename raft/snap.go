@@ -8,10 +8,10 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 
 	// 不安装老旧的快照
 	if lastIncludedIndex < rf.RWLog.SnapshotIndex {
-		Debug(dSnap, "[%d] S%d REFUSE INSTALL - OLD SNAP, LII:%d, SI:%d", rf.CurrentTerm, rf.me, lastIncludedIndex, rf.RWLog.SnapshotIndex)
+		Debug(dSnap, "[%d] R%d REFUSE INSTALL - OLD SNAP, LII:%d, SI:%d", rf.CurrentTerm, rf.me, lastIncludedIndex, rf.RWLog.SnapshotIndex)
 		return false
 	}
-	Debug(dSnap, "[%d] S%d INSTALL SNAPSHOT, LII:%d, SI:%d", rf.CurrentTerm, rf.me, lastIncludedIndex, rf.RWLog.SnapshotIndex)
+	Debug(dSnap, "[%d] R%d INSTALL SNAPSHOT, LII:%d, SI:%d", rf.CurrentTerm, rf.me, lastIncludedIndex, rf.RWLog.SnapshotIndex)
 	return true
 }
 
@@ -20,13 +20,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	// 防止rf.RWLog.SnapshotIndex的读写冲突
 	rf.RWLog.mu.Lock()
-	Debug(dSnap, "[%d] S%d CALL SNAPSHOT, LII:%d, SI:%d", rf.CurrentTerm, rf.me, index, rf.RWLog.SnapshotIndex)
+	Debug(dSnap, "[%d] R%d CALL SNAPSHOT, LII:%d, SI:%d", rf.CurrentTerm, rf.me, index, rf.RWLog.SnapshotIndex)
 
 	offset := index - rf.RWLog.SnapshotIndex
 
 	// 丢弃过时的快照
 	if offset < 0 {
-		Debug(dSnap, "[%d] S%d REFUSE SNAPSHOT - OLD INDEX, LII:%d, SI:%d", rf.CurrentTerm, rf.me, index, rf.RWLog.SnapshotIndex)
+		Debug(dSnap, "[%d] R%d REFUSE SNAPSHOT - OLD INDEX, LII:%d, SI:%d", rf.CurrentTerm, rf.me, index, rf.RWLog.SnapshotIndex)
 		rf.RWLog.mu.Unlock()
 		return
 	}

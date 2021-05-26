@@ -44,12 +44,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// reply.term取较大值
 	reply.Term = max(term, currentTerm)
 	reply.Valid = true
-	Debug(dVote, "[%d] S%d RECEIVE<- S%d,T:%d LLI:%d LLT:%d", currentTerm, me, candidateID, term, args.LastLogIndex, args.LastLogTerm)
+	Debug(dVote, "[%d] R%d RECEIVE<- R%d,T:%d LLI:%d LLT:%d", currentTerm, me, candidateID, term, args.LastLogIndex, args.LastLogTerm)
 
 	// CANDIDATE的term过时了，投反对票
 	if term < currentTerm {
 		reply.VoteGranted = false // 通知CANDIATE更新自己的term
-		Debug(dVote, "[%d] S%d REFUSE -> S%d, OLD TERM", currentTerm, me, candidateID)
+		Debug(dVote, "[%d] R%d REFUSE -> R%d, OLD TERM", currentTerm, me, candidateID)
 		return
 	}
 
@@ -73,7 +73,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			image = *i
 			currentTerm = image.CurrentTerm
 			votedFor = image.VotedFor
-			Debug(dVote, "[%d] S%d CONVERT FOLLOWER <- S%d, NEW TERM", term, rf.me, candidateID)
+			Debug(dVote, "[%d] R%d CONVERT FOLLOWER <- R%d, NEW TERM", term, rf.me, candidateID)
 		})
 		// server状态已经发生了改变
 		if !reply.Valid {
@@ -85,7 +85,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 已经没有票了
 	if votedFor != -1 && votedFor != candidateID {
 		reply.VoteGranted = false
-		Debug(dVote, "[%d] S%d REFUSE -> S%d, NO VOTE.", currentTerm, me, candidateID)
+		Debug(dVote, "[%d] R%d REFUSE -> R%d, NO VOTE.", currentTerm, me, candidateID)
 		return
 	}
 
@@ -106,7 +106,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			close(i.done)
 			// 使新Image实例生效
 			i.done = make(chan signal)
-			Debug(dVote, "[%d] S%d VOTE -> S%d", currentTerm, me, candidateID)
+			Debug(dVote, "[%d] R%d VOTE -> R%d", currentTerm, me, candidateID)
 
 			i.resetTimer() // 确定投赞成票后要重置计时器
 		})
@@ -114,7 +114,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	// 拒绝投票
 	reply.VoteGranted = false
-	Debug(dVote, "[%d] S%d REFUSE VOTE -> S%d, Old LOG", currentTerm, me, candidateID)
+	Debug(dVote, "[%d] R%d REFUSE VOTE -> R%d, Old LOG", currentTerm, me, candidateID)
 }
 
 // 用来计票的工作协程，为了保证计票结果得正确性，在获得半数赞成票之前votesCounter
@@ -143,7 +143,7 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 
 			// 处理有效票
 			if reply.Valid {
-				Debug(dVote, "[%d] S%d <-REPLY S%d, V:%v GV:%v T:%d", image.CurrentTerm, image.me, reply.ID, reply.Valid, reply.VoteGranted, reply.Term)
+				Debug(dVote, "[%d] R%d <-REPLY R%d, V:%v GV:%v T:%d", image.CurrentTerm, image.me, reply.ID, reply.Valid, reply.VoteGranted, reply.Term)
 				// 获得一张反对票
 				if !reply.VoteGranted {
 					if reply.Term > image.CurrentTerm {
@@ -159,7 +159,7 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 							close(i.done)
 							// 使新Image生效
 							i.done = make(chan signal)
-							Debug(dTimer, "[%d] S%d CONVERT FOLLOWER <- S%d NEW TERM.", i.CurrentTerm, i.me, reply.ID)
+							Debug(dTimer, "[%d] R%d CONVERT FOLLOWER <- R%d NEW TERM.", i.CurrentTerm, i.me, reply.ID)
 						})
 					}
 					goto check
@@ -178,7 +178,7 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 						close(i.done)
 						// 重新绑定一个image.don就能使新Image实例生效
 						i.done = make(chan signal)
-						Debug(dVote, "[%d] S%d CONVERT LEADER.", i.CurrentTerm, i.me)
+						Debug(dVote, "[%d] R%d CONVERT LEADER.", i.CurrentTerm, i.me)
 
 						// 重置计时器，设置心跳时间
 						i.resetTimer()
@@ -221,7 +221,7 @@ func (rf *Raft) sendRequestVote() {
 	<-votesCounter(image, replysCh)
 
 	// 开始选举
-	Debug(dVote, "[%d] S%d SEND RV RPC", image.CurrentTerm, rf.me)
+	Debug(dVote, "[%d] R%d SEND RV RPC", image.CurrentTerm, rf.me)
 	for server := range rf.peers {
 		if server == rf.me {
 			continue
