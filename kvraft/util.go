@@ -1,4 +1,4 @@
-package raft
+package kvraft
 
 import (
 	"fmt"
@@ -12,19 +12,8 @@ import (
 type logTopic string
 
 const (
-	dClient  logTopic = "CLNT" // 客户端请求
-	dCommit  logTopic = "CMIT" // 提交日志
-	dKill    logTopic = "KILL" // server宕机
-	dAppend  logTopic = "APET" // AE RPC
-	dPersist logTopic = "PERS" // 持久化操作
-	dTimer   logTopic = "TIMR" // 定时器操作
-	dVote    logTopic = "VOTE" // RV RPC
-	dSnap    logTopic = "SNAP" // 快照
-	dTerm    logTopic = "TERM" // 修改任期
-	dTest    logTopic = "TEST" // 测试信息
-	dTrace   logTopic = "TRCE"
-	dError   logTopic = "ERRO"
-	dWarn    logTopic = "WARN"
+	dClient  logTopic = "CLNT" // 客户端
+	dServer  logTopic = "SEVE" // 服务端
 )
 
 var debugStart time.Time
