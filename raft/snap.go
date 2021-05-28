@@ -20,6 +20,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	// 防止rf.RWLog.SnapshotIndex的读写冲突
 	rf.RWLog.mu.Lock()
+	defer rf.RWLog.mu.Unlock()
 	Debug(dSnap, "[%d] R%d CALL SNAPSHOT, LII:%d, SI:%d", rf.CurrentTerm, rf.me, index, rf.RWLog.SnapshotIndex)
 
 	offset := index - rf.RWLog.SnapshotIndex
@@ -27,7 +28,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// 丢弃过时的快照
 	if offset < 0 {
 		Debug(dSnap, "[%d] R%d REFUSE SNAPSHOT - OLD INDEX, LII:%d, SI:%d", rf.CurrentTerm, rf.me, index, rf.RWLog.SnapshotIndex)
-		rf.RWLog.mu.Unlock()
 		return
 	}
 	rf.RWLog.SnapshotIndex = index
@@ -48,10 +48,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		Term:  entries[0].Term,
 		Index: entries[0].Index,
 	}
-	rf.RWLog.mu.Unlock()
-
 	// 持久化日志和快照
-	rf.mu.RLock()
 	rf.persist()
-	rf.mu.RUnlock()
 }

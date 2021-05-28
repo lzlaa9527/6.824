@@ -79,7 +79,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if !reply.Valid {
 			return
 		}
-
 	}
 
 	// 已经没有票了
@@ -171,17 +170,29 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 					// 通知ticker协程将serve的状态更新为leader
 					// 只有当前的Image实例有效时，更新函数才会执行
 					image.Update(func(i *Image) {
-						// 设置新的Image
-						i.State = LEADER
+						rf := i.Raft
+						rf.State = LEADER
+
+						// 初始化server的状态
+						rf.nextIndex = make([]int, len(rf.peers))
+						rf.matchIndex = make([]int, len(rf.peers))
+						// rf.nmmutex = make([]*sync.RWMutex, len(rf.peers))
+
+						rf.RWLog.mu.RLock()
+						for j := range rf.peers {
+							rf.nextIndex[j] = len(rf.Log) + rf.RWLog.SnapshotIndex
+							rf.matchIndex[j] = rf.RWLog.SnapshotIndex
+						}
+						rf.RWLog.mu.RUnlock()
 
 						// 因为需要改变server的状态，所以应该使之前的Image实例失效
-						close(i.done)
+						close(rf.done)
 						// 重新绑定一个image.don就能使新Image实例生效
-						i.done = make(chan signal)
-						Debug(dVote, "[%d] R%d CONVERT LEADER.", i.CurrentTerm, i.me)
+						rf.done = make(chan signal)
+						Debug(dVote, "[%d] R%d CONVERT LEADER.", rf.CurrentTerm, rf.me)
 
 						// 重置计时器，设置心跳时间
-						i.resetTimer()
+						rf.resetTimer()
 					})
 				}
 			}

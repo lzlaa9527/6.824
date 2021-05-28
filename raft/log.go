@@ -69,13 +69,11 @@ func (rf *Raft) applier() {
 				rf.RWLog.mu.RUnlock()
 				continue
 			}
-			Debug(dCommit, "[%d] R%d APPLY LA:%d, SI:%d", rf.CurrentTerm, rf.me, rf.lastApplied, snapshotIndex)
-			entry := &rf.Log[rf.lastApplied-snapshotIndex]
+			entry := rf.Log[rf.lastApplied-snapshotIndex]
 			rf.RWLog.mu.RUnlock()
-
+			Debug(dCommit, "[%d] R%d APPLY LA:%d, SI:%d", rf.CurrentTerm, rf.me, rf.lastApplied, snapshotIndex)
 			rf.applyCh <- entry.ApplyMsg
 			rf.lastApplied++
 		}
-
 	}
 }
