@@ -23,7 +23,7 @@ TOPICS = {
 
     "PERS": "#d08341",
     "ERRO": "#fe2626",
-    "TRCE": "#fe2626",
+    "SEVE": "#fe2626",
 }
 
 

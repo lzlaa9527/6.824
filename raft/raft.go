@@ -36,16 +36,17 @@ type Raft struct {
 	*Image // server的状态:CurrentTerm、State、VotedFor
 	timer  *time.Timer
 
-
 	*RWLog // 并发安全的日志条目数组
 
 	commitIndex int
+
 	lastApplied int
 	applyCh     chan ApplyMsg
 	commitCh    chan int
 
 	nextIndex  []int
 	matchIndex []int
+	// nmmutex    []*sync.RWMutex // 保证nextIndex、matchIndex的并发读写的正确性
 }
 
 func (rf *Raft) GetState() (int, bool) {
@@ -56,8 +57,6 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 func (rf *Raft) persist() {
-	rf.RWLog.mu.RLock()
-	defer rf.RWLog.mu.RUnlock()
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -66,15 +65,19 @@ func (rf *Raft) persist() {
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.Log) // 这里包含日志条目与快照
 	state := w.Bytes()
+	rf.persister.SaveRaftState(state)
 
 	// 测试代码的需要：单独存储快照
 	// 因为快照存储在Log中，因此不单独存储快照也可以
-	w = new(bytes.Buffer)
-	e = labgob.NewEncoder(w)
-	e.Encode(rf.Log[0])
-	snapshot := w.Bytes()
-	rf.persister.SaveStateAndSnapshot(state, snapshot)
-	Debug(dPersist, "[%d] S%d SAVE STATE, VF:%d, SI:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.SnapshotIndex, rf.RWLog.String())
+	if rf.Log[0].SnapshotValid {
+		w = new(bytes.Buffer)
+		e = labgob.NewEncoder(w)
+		e.Encode(rf.Log[0])
+		snapshot := w.Bytes()
+		rf.persister.SaveStateAndSnapshot(state, snapshot)
+	}
+	Debug(dPersist, "[%d] R%d SAVE STATE, VF:%d, SI:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.SnapshotIndex, rf.RWLog.String())
+
 }
 
 func (rf *Raft) readPersist() {
@@ -97,15 +100,15 @@ func (rf *Raft) readPersist() {
 		d := labgob.NewDecoder(r)
 
 		if err := d.Decode(&rf.CurrentTerm); err != nil {
-			Debug(dError, "S%d Read CT failed, err:%v", rf.me, err)
+			Debug(dError, "R%d Read CT failed, err:%v", rf.me, err)
 		}
 
 		if err := d.Decode(&rf.VotedFor); err != nil {
-			Debug(dError, "S%d Read VF failed, err:%v", rf.me, err)
+			Debug(dError, "R%d Read VF failed, err:%v", rf.me, err)
 		}
 
 		if err := d.Decode(&rf.Log); err != nil {
-			Debug(dError, "S%d Read LOG failed, err:%v", rf.me, err)
+			Debug(dError, "R%d Read LOG failed, err:%v", rf.me, err)
 		}
 		// 读取快照之后设置SnapshotIndex，如果没有快照SnapshotIndex=0
 		rf.RWLog.SnapshotIndex = rf.Log[0].SnapshotIndex
@@ -117,30 +120,32 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
-	// 避免leader发生状态转换
+	// 获取server当前状态的镜像
 	rf.mu.RLock()
-	defer rf.mu.RUnlock()
+	image := *rf.Image
+	rf.mu.RUnlock()
 
-	if rf.killed() || rf.State != LEADER {
+	if image.State != LEADER {
 		return -1, -1, false
 	}
-	term = rf.CurrentTerm
-	isLeader = true
 
-	// 并发添加日志时申请logMu，确保index的正确性
-	rf.RWLog.mu.Lock()
-	defer rf.RWLog.mu.Unlock()
+	// 通知ticker协程添加日志，并及时发送AE RPC
+	isLeader = image.Update(func(i *Image) {
+		rf := i.Raft
+		term = rf.CurrentTerm
+		// 并发添加日志时申请logMu，确保index的正确性
+		rf.RWLog.mu.Lock()
+		index = len(rf.Log) + rf.RWLog.SnapshotIndex
+		rf.Log = append(rf.Log, Entry{
+			ApplyMsg: ApplyMsg{Command: command, CommandIndex: index, CommandValid: true},
+			Term:     term,
+			Index:    index,
+		})
+		rf.RWLog.mu.Unlock()
+		Debug(dClient, "[%d] R%d APPEND ENTRY. IN:%d, TE:%d， CO:%v", rf.CurrentTerm, rf.me, index, rf.Log[index-rf.RWLog.SnapshotIndex].Term, command)
+		rf.resetTimer()
 
-	index = len(rf.Log) + rf.RWLog.SnapshotIndex
-
-	rf.Log = append(rf.Log, Entry{
-		ApplyMsg: ApplyMsg{Command: command, CommandIndex: index, CommandValid: true},
-		Term:     rf.CurrentTerm,
-		Index:    index,
 	})
-
-	Debug(dClient, "[%d] S%d APPEND ENTRY. IN:%d, TE:%d， CO:%v", rf.CurrentTerm, rf.me, index, rf.Log[index-rf.RWLog.SnapshotIndex].Term, command)
-
 	return index, term, isLeader
 }
 
@@ -178,12 +183,13 @@ func (rf *Raft) resetTimer() {
 	case FOLLOWER:
 		ELT := electionTime()
 		rf.timer.Reset(ELT)
-		Debug(dTimer, "[%d] S%d CONVERT FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
+		Debug(dTimer, "[%d] R%d CONVERT FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
 	case CANDIDATE:
 		ELT := electionTime()
 		rf.timer.Reset(ELT)
-		Debug(dTimer, "[%d] S%d CONVERT CANDIDATE, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
+		Debug(dTimer, "[%d] R%d CONVERT CANDIDATE, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
 	case LEADER:
+		Debug(dTimer, "[%d] R%d HEARTBEAT.", rf.CurrentTerm, rf.me)
 		rf.timer.Reset(HEARTBEAT)
 	}
 }
@@ -193,7 +199,7 @@ func (rf *Raft) ticker() {
 	for {
 		select {
 		case <-rf.dead:
-			Debug(dKill, "[%d] S%d BE KILLED", rf.CurrentTerm, rf.me)
+			Debug(dKill, "[%d] R%d BE KILLED", rf.CurrentTerm, rf.me)
 			close(rf.done) // 通知所有的工作协程退出
 			rf.timer.Stop()
 			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
@@ -202,17 +208,6 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()             // 更新server状态时申请写锁，避免读写冲突
 			f(rf.Image)              // 更新server状态，可能会重置计时器
 			rf.Image.did <- signal{} // 通知工作协程，update函数已执行
-
-			// 当server从其他状态变为leader时，初始化matchIndex、nextIndex
-			if rf.Image.State == LEADER {
-				rf.nextIndex = make([]int, len(rf.peers))
-				rf.matchIndex = make([]int, len(rf.peers))
-				rf.RWLog.mu.RLock()
-				for i := range rf.nextIndex {
-					rf.nextIndex[i] = len(rf.Log) + rf.RWLog.SnapshotIndex
-				}
-				rf.RWLog.mu.RUnlock()
-			}
 			rf.mu.Unlock()
 
 		case <-rf.timer.C:
@@ -223,7 +218,7 @@ func (rf *Raft) ticker() {
 				rf.CurrentTerm++
 				rf.VotedFor = rf.me
 				// server的状态发生改变，原来的Image虽之失效
-				Debug(dTimer, "[%d] S%d CLOSE image.done", rf.CurrentTerm, rf.me)
+				Debug(dTimer, "[%d] R%d CLOSE image.done", rf.CurrentTerm, rf.me)
 				close(rf.Image.done)
 				rf.Image.done = make(chan signal)
 			}
@@ -232,7 +227,10 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 		}
 		// 改变状态之后需要持久化保存
+		rf.RWLog.mu.RLock()
 		rf.persist()
+		rf.RWLog.mu.RUnlock()
+
 
 		// 执行后续动作
 		// 在ticker协程中对状态的读操作不存在读写冲突，没有必要加锁
@@ -241,7 +239,6 @@ func (rf *Raft) ticker() {
 		case CANDIDATE:
 			rf.sendRequestVote()
 		case LEADER:
-
 			// leader 任期开始时添加一个空的日志条目 no-op 条目
 			// if rf.Log[len(rf.Log)-1].Term != rf.CurrentTerm {
 			// 	index := len(rf.Log)
@@ -250,7 +247,7 @@ func (rf *Raft) ticker() {
 			// 		ApplyMsg: ApplyMsg{Command: nil, CommandIndex: index},
 			// 		Term:     rf.CurrentTerm,
 			// 	})
-			// 	Debug(dAppend, "[%d] S%d Append Entry. IN:%d, TE:%d", rf.CurrentTerm, rf.me, index, rf.Log[index].Term)
+			// 	Debug(dAppend, "[%d] R%d Append Entry. IN:%d, TE:%d", rf.CurrentTerm, rf.me, index, rf.Log[index].Term)
 			// }
 			// rf.timer.Reset(HEARTBEAT)
 			rf.SendAppendEntries()
@@ -281,12 +278,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from State persisted before a crash
 	rf.readPersist()
 	rf.timer = time.NewTimer(electionTime())
-
 	go rf.ticker()
 	go rf.applier()
 
 	// start ticker goroutine to start elections
-	Debug(dTest, "[%d] S%d START.", rf.CurrentTerm, rf.me)
+	Debug(dTest, "[%d] R%d START.", rf.CurrentTerm, rf.me)
 
 	return rf
 }
