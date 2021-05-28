@@ -122,12 +122,12 @@ func spawn_clients_and_wait(t *testing.T, cfg *config, ncli int, fn func(me int,
 	}
 }
 
-// predict effect of Append(k, val) if old value is prev.
+// predict effect of Append(k, val) if old msg is prev.
 func NextValue(prev string, val string) string {
 	return prev + val
 }
 
-// check that for a specific client all known appends are present in a value,
+// check that for a specific client all known appends are present in a msg,
 // and in order
 func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 	lastoff := -1
@@ -148,7 +148,7 @@ func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 	}
 }
 
-// check that all known appends are present in a value,
+// check that all known appends are present in a msg,
 // and are in order for each concurrent client.
 func checkConcurrentAppends(t *testing.T, v string, counts []int) {
 	nclients := len(counts)
@@ -284,7 +284,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 					v := Get(cfg, myck, key, opLog, cli)
 					// the following check only makes sense when we're not using random keys
 					if !randomkeys && v != last {
-						t.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
+						t.Fatalf("get wrong msg, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
 					}
 				}
 			}
@@ -317,7 +317,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			for i := 0; i < nservers; i++ {
 				cfg.ShutdownServer(i)
 			}
-			// Wait for a while for servers to shutdown, since
+			// CondWait for a while for servers to shutdown, since
 			// shutdown isn't a real crash and isn't instantaneous
 			time.Sleep(electionTimeout)
 			// log.Printf("restart servers\n")
