@@ -289,15 +289,25 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 		newMatchIndex = matchIndex
 	)
 
+	// 避免LEADER的状态发生改变
+	image.mu.RLock()
+	defer image.mu.RUnlock()
+	if image.Done() {
+		return
+	}
+
+	// 避免LEADER的日志压缩带来的问题
+	image.RWLog.mu.RLock()
+	defer image.RWLog.mu.RUnlock()
+
 	// 日志匹配不成功
 	if !reply.Success {
-		image.RWLog.mu.RLock()
+
 		snapshotIndex := image.RWLog.SnapshotIndex
 		// nextIndex不能小于snapshotIndex，因为snapshot之前的日志已经被删除了
 		newNextIndex = max(reply.ConflictIndex, snapshotIndex)
 		// 如果reply.ConflictTerm != -1从日志中搜索和FOLLOWER可以匹配的日志条目
 		if reply.ConflictTerm != -1 {
-
 			// 如果image.Log[newNextIndex - snapshotIndex].Term != reply.ConflictTerm，
 			// 那么newNextIndex左边的日志也不可能与FOLLOWER的日志匹配
 			if image.Log[newNextIndex-snapshotIndex].Term == reply.ConflictTerm {
@@ -305,7 +315,7 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 				}
 			}
 		}
-		image.RWLog.mu.RUnlock()
+
 	} else {
 		// 日志匹配的情况
 		newNextIndex += len(args.Log)
@@ -317,33 +327,21 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 		return
 	}
 
-	// 如果server的状态没有改变，更新peer的nextIndex、newMatchIndex值
 	// 采用CAS的方式，保证并发情况下nextIndex、matchIndex的正确性
-	// 即使server的状态已经发生改变不再是leader，修改nextIndex、matchIndex也是无害的
-	if !image.Done() && atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.nextIndex[peerIndex])), int64(nextIndex), int64(newNextIndex)) &&
+	if atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.nextIndex[peerIndex])), int64(nextIndex), int64(newNextIndex)) &&
 		atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.matchIndex[peerIndex])), int64(matchIndex), int64(newMatchIndex)) {
 		Debug(dAppend, "[%d] R%d UPDATE M&N -> R%d, MI:%d, NI:%d", image.CurrentTerm, image.me, peerIndex, newMatchIndex, newNextIndex)
+
+		// 通知LEADER提交日志
+		if newMatchIndex > matchIndex {
+			image.Raft.updateCommitIndex(image, newMatchIndex)
+		}
 	}
 }
 
-// CalculateCommitIndex 在leader发送心跳之前计算commitIndex
-func (rf *Raft) calculateCommitIndex() {
-
-	// 采用CAS的思想，更新commitIndex， 因此整个过程就没必要加锁了.
-	// 如果在提交之前commitIndex发生改变，就放弃提交；
-	// oldCommitIndex := int(atomic.LoadInt64((*int64)(unsafe.Pointer(&rf.commitIndex))))
-	// oldCommitIndex := rf.commitIndex
-
-	newCommitIndex := -1
-	for i := 0; i < len(rf.peers); i++ {
-		if i == rf.me {
-			continue
-		}
-
-		// 计算matchIndex的上限，加速计算出正确的commitIndex
-		// 对于matchIndex的读操作可能存在读写冲突，但是不影响正确性
-		newCommitIndex = max(rf.matchIndex[i], newCommitIndex)
-	}
+// 当某个FOLLOWER的matchIndex更新之后，计算新的commitIndex；
+// 如果commitIndex更新之后，立即提交LEADER的日志
+func (rf *Raft) updateCommitIndex(image Image, matchIndex int) {
 
 	// 找到首个能提交的日志条目，更新commitIndex
 loop:
@@ -353,7 +351,7 @@ loop:
 			if i == rf.me {
 				continue
 			}
-			if rf.matchIndex[i] >= newCommitIndex {
+			if rf.matchIndex[i] >= matchIndex {
 				count++
 			}
 			// 找到首个大多数server均接受的日志条目时就不用再向前找了
@@ -361,40 +359,32 @@ loop:
 				break loop
 			}
 		}
-		newCommitIndex--
+		matchIndex--
 	}
 
-	// 是否需要更新commitIndex
-	update := true
+	commitIndex := rf.commitIndex
 
+	// 一方面：commitIndex 的更新必须保证单调性；另一方面，commitIndex >= snapshoyIndex，可以避免越界问题
 	// 不能提交其它任期的entry
-	if rf.Log[newCommitIndex-rf.RWLog.SnapshotIndex].Term != rf.CurrentTerm {
-		update = false
-	}
-
-	// 没必要更新commitIndex字段
-	if newCommitIndex <= rf.commitIndex {
-		update = false
-	}
-
-	// 不用更新rf.CommitIndex
-	if !update {
+	if matchIndex <= commitIndex || rf.Log[matchIndex-rf.RWLog.SnapshotIndex].Term != rf.CurrentTerm {
 		return
 	}
-	rf.commitIndex = newCommitIndex
 
-	// 通知applier协程提交日志，放在协程内执行可以让calculateCommitIndex尽快返回
-	go func() {
-		Debug(dCommit, "[%d] R%d UPDATE CI:%d", rf.CurrentTerm, rf.me, newCommitIndex)
-		rf.commitCh <- newCommitIndex
-	}()
+	// 保证commitIndex的单调性
+	if !image.Done() && atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&rf.commitIndex)), int64(commitIndex), int64(matchIndex)) {
+
+		// 通知applier协程提交日志，放在协程内执行可以让calculateCommitIndex尽快返回
+		go func() {
+			Debug(dCommit, "[%d] R%d UPDATE CI:%d", rf.CurrentTerm, rf.me, matchIndex)
+			rf.commitCh <- matchIndex
+		}()
+	}
 }
 
 func (rf *Raft) SendAppendEntries() {
 	image := *rf.Image
-	rf.calculateCommitIndex() // 更新commitIndex
-	Debug(dAppend, "[%d] R%d SEND AE RPC.", rf.CurrentTerm, rf.me)
 
+	Debug(dAppend, "[%d] R%d SEND AE RPC.", rf.CurrentTerm, rf.me)
 	rf.RWLog.mu.RLock()
 	defer rf.RWLog.mu.RUnlock()
 	for server := range rf.peers {
