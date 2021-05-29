@@ -39,7 +39,7 @@ func (ck *Clerk) Get(key string) string {
 			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
 			continue
 		}
-		Debug(dClient, "[*] C%d RECEIVE REPLY:%+v", ck.ClerkID, reply)
+		Debug(dClient, "[*] C%d GET REPLY:%+v", ck.ClerkID, reply)
 		switch reply.Err {
 		case OK:
 			return reply.Value

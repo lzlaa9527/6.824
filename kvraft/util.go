@@ -14,6 +14,7 @@ type logTopic string
 const (
 	dClient  logTopic = "CLNT" // 客户端
 	dServer  logTopic = "SEVE" // 服务端
+	dError   logTopic = "ERRO"
 )
 
 var debugStart time.Time
