@@ -4,97 +4,11 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"bytes"
+	"log"
 	"sync"
 	"sync/atomic"
 )
-
-type signal struct{}
-
-type Result struct {
-	s     chan signal
-	op    Op
-	reply interface{}
-}
-
-type Index int
-
-// 存储 raft Index处对应的Op，及其执行结果
-type Results map[Index]*Result
-
-// 阻塞在i处的Op对应的signal channel上，并在被唤醒后获取到Op以及对应的Result
-// 当Op被执行之后applier协程通过关闭该signal channel通知阻塞的工作协程
-// 如果调用协程是第一个调用者，首先初始化该signal
-func (r Results) Wait(i Index) *Result {
-	ret, ok := r[i]
-	if ok == false {
-		r[i] = &Result{
-			s: make(chan signal),
-		}
-		ret = r[i]
-		<-ret.s
-	} else {
-		<-ret.s
-	}
-	return ret
-}
-
-func (r Results) SetAndBroadcast(i Index, op Op, re interface{}) {
-	ret, ok := r[i]
-	if !ok { // 没有等待该Op的工作协程，直接返回
-		return
-	}
-	ret.op = op
-	// 设置op的执行结果
-	ret.reply = re
-	// 唤醒等待协程
-	close(ret.s)
-}
-
-func (r Results) Delete(i Index) {
-	delete(r, i)
-}
-
-// 每一个Client的Op都有一个唯一标识符Identifier
-// ClerkID	标识Client ID
-// Seq		标识Client下一个Op的序号
-type Identifier struct {
-	ClerkID int
-	Seq     int
-}
-
-// ITable是Server记录目前各个Client待提交Op的Seq的哈希表
-// 关键字是Client的ClerkID
-// 值是该Client目前待提交的Seq
-type ITable map[int]int
-
-// 返回clerkID对应Client的可用的Op标识符
-func (itable ITable) GetIdentifier(clerkID int) Identifier {
-
-	return Identifier{
-		ClerkID: clerkID,
-		Seq:     itable[clerkID],
-	}
-}
-
-// 更新clerkID对应Client的下一个Op标识符
-func (itable ITable) UpdateIdentifier(clerkID int) {
-	itable[clerkID]++
-}
-
-// 如果i标识的Op已经被执行过了，Executed返回true
-func (itable ITable) Executed(i Identifier) bool {
-	return i.Seq < itable[i.ClerkID]
-}
-
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-	Kind  string
-	Key   string
-	Value string
-	ID    Identifier
-}
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -103,20 +17,22 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
 
-	maxraftstate int // snapshot if log grows this big
+	maxraftstate int
 
 	// Your definitions here.
-	ITable // 用来记录每个客户端已经处理了的Op序列号
-	Results
-	Database // 数据库
+	ITable        // 记录每个客户端已经处理了的Op序列号，二元组：(ClerkID, OpSeq)是客户端Op的唯一标识符
+	OpResults     // 存储server已经处理的Op及其结果
+	Database      // 数据库
+	OpIndex   int // 已经处理的op序列号，初始化为1
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	clerkID := args.ClerkID
 	op := Op{
-		Kind: "Get",
-		Key:  args.Key,
+		ServerID: kv.me,
+		Kind:     "Get",
+		Key:      args.Key,
 
 		// GetIdentifier(clerkID)获取clerkID对应的客户端下一个Op对应的Seq
 		ID: kv.GetIdentifier(clerkID),
@@ -130,10 +46,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		Debug(dServer, "[*] S%d NOT LEADER.", kv.me)
 		return
 	}
-
-	Debug(dServer, "[*] S%d SEND MSG TO RAFT.", kv.me)
+	Debug(dServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
 
 	ret, err := kv.waitAndMatch(index, op)
+	Debug(dServer, "[*] S%d GET REPLY, SEQ: %d.", kv.me, index)
 	if ret != nil {
 		reply.Err = ret.(*GetReply).Err
 		reply.Value = ret.(*GetReply).Value
@@ -142,51 +58,53 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 }
 
-// 工作协程阻塞在条件变量kv.WithValueCond等待raft提交日志，
-// 被唤醒后并判断raft提交的日志是不是记录op所标识的任务。
-// 日志记录在kv.WithValueCond中
-//
-func (kv *KVServer) waitAndMatch(index int, reqOp Op) (interface{}, Err) {
-
-	result := kv.Results.Wait(Index(index))
-	resOp := result.op // raft所提交日志中的ApplyMsg
-
-	// leadership 发生变更，或者原先提交的请求被覆盖时index处的 resOp != reqOp
-	if resOp != reqOp {
-		return nil, ErrWrongLeader
-	}
-	kv.Results.Delete(Index(index)) // 为了节约内存及时删除缓存
-	return result.reply, ""
-}
-
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	clerkID := args.ClerkID
 
 	op := Op{
-		Kind:  args.Kind,
-		Key:   args.Key,
-		Value: args.Value,
+		ServerID: kv.me,
+		Kind:     args.Kind,
+		Key:      args.Key,
+		Value:    args.Value,
 		// GetIdentifier(clerkID)获取clerkID对应的客户端下一个Op对应的Seq
 		ID: kv.GetIdentifier(clerkID),
 	}
 
 	Debug(dServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
-
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		Debug(dServer, "[*] S%d NOT LEADER.", kv.me)
 		return
 	}
+	Debug(dServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
 
-	Debug(dServer, "[*] S%d SEND MSG TO RAFT.", kv.me)
 	ret, err := kv.waitAndMatch(index, op)
+	Debug(dServer, "[*] S%d GET REPLY, SEQ: %d.", kv.me, index)
 	if ret != nil {
 		reply.Err = ret.(*PutAppendReply).Err
 	} else {
 		reply.Err = err
 	}
+}
+
+// clerk协程等待reqOp的完成。
+// 因为存在raft leadership的转变，多个clerk可能会等待同一个index的op；当server执行完
+// index对应的op后，会通知所有等待的clerk协程；clerk协程会根据result.op == reqOp判断
+// 完成的op是不是自己提交的op；如果不是就表明发生了leadership的转变
+//
+func (kv *KVServer) waitAndMatch(index int, reqOp Op) (interface{}, Err) {
+
+	result := kv.OpResults.Wait(Index(index))
+	resOp := result.op // raft所提交日志中的ApplyMsg
+
+	// leadership 发生变更，或者原先提交的请求被覆盖时index处的 resOp != reqOp
+	if resOp != reqOp {
+		return nil, ErrWrongLeader
+	}
+	kv.OpResults.Delete(Index(index)) // 为了节约内存及时删除缓存
+	return result.reply, ""
 }
 
 //
@@ -202,7 +120,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
-	// Your code here, if desired.
+	kv.OpResults.Destory() // 通知尚未退出的clerk退出
+	close(kv.applyCh)      // 通知applier协程退出
 }
 
 func (kv *KVServer) killed() bool {
@@ -240,7 +159,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.ITable = make(ITable)
-	kv.Results = make(Results)
+	kv.OpResults = OpResults{
+		table: make(map[Index]*OpResult),
+		mu:    new(sync.Mutex),
+	}
 	kv.Database = make(Database)
 
 	go kv.applier()
@@ -249,42 +171,90 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	return kv
 }
 
-// 监听kv.applyCh并检测每一个被提交的日志中所包含的命令(Kind)，
-// 通过检测命令中的唯一标识符判断该命令是否被提交两次。
-// 如果是，不被执行但直接返回结果
-// 如果不是，执行并返回结果，同时更新对应Client下一个Op的标识符
+// applier是唯一改变的server状态的工作协程，主要执行如下工作：
+// 1. applier安装raft提交的快照，重建Database，以及ITable。
+// 2. applier协程用来执行被raft提交的op更新数据库状态，并且唤醒等待该op的clerk协程；
+// 3. 如果raft的statesize达到maxstatesize，就通知raft拍摄快照
 func (kv *KVServer) applier() {
-	for msg := range kv.applyCh {
-		Debug(dServer, "[*] S%d RECEIVE MSG:%+v", kv.me, msg)
-		if !msg.CommandValid {
-			continue
-		}
-		op := msg.Command.(Op)
-		identifier := op.ID
-		index := msg.CommandIndex
-
-		// 忽略被重复提交的命令
-		if kv.ITable.Executed(identifier) {
-			continue
+	for applyMsg := range kv.applyCh {
+		if kv.killed() {
+			return
 		}
 
-		// 更新clerkID对应的Client的下一个Op的Seq
-		kv.ITable.UpdateIdentifier(identifier.ClerkID)
+		Debug(dServer, "[*] S%d RECEIVE MSG:%+v", kv.me, applyMsg)
 
-		var reply interface{}
-		// 执行对应的命令
-		switch op.Kind {
-		case "Get":
-			reply = kv.Database.Get(op.Key)
-		case "Put":
-			reply = kv.Database.Put(op.Key, op.Value)
-		case "Append":
-			reply = kv.Database.Append(op.Key, op.Value)
+		if applyMsg.SnapshotValid { // 应用snapshot
+			kv.InstallSnapshot(applyMsg.Snapshot)
+		} else { // 应用普通的日志条目
+			if !applyMsg.CommandValid {
+				continue
+			}
+			op := applyMsg.Command.(Op)
+			identifier := op.ID
+			index := applyMsg.CommandIndex
+
+			// 忽略唯一标识符重复的op
+			// 避免因为leadership变更，导致一个op重复执行
+			if kv.ITable.Executed(identifier) {
+				continue
+			}
+
+			// 更新clerkID对应的Client的下一个Op的Seq
+			kv.ITable.UpdateIdentifier(identifier.ClerkID)
+
+			var reply interface{}
+			// 执行对应的命令
+			switch op.Kind {
+			case "Get":
+				reply = kv.Database.Get(op.Key)
+			case "Put":
+				reply = kv.Database.Put(op.Key, op.Value)
+			case "Append":
+				reply = kv.Database.Append(op.Key, op.Value)
+			}
+
+			// 唤醒等待op执行结果的clerk协程。
+			// 如果op.ServerID == kv.me说明该op是通过当前Server提交的，并且
+			// 当applyMsg.DupCommitted == false时说明该op是在server重启后提交的。
+			//
+			// 重启前提交的op需要被重放，但是不存在clerk协程等待server重启前提交的op。
+			kv.OpResults.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.DupCommitted)
+			Debug(dServer, "[*] S%d HANDLE OP:%+v, REPLY:%+v", kv.me, op, reply)
 		}
 
-		Debug(dServer, "[*] S%d HANDLE OP:%+v, REPLY:%+v", kv.me, op, reply)
+		// 通知raft进行snapshot
+		if kv.maxraftstate <= kv.rf.RaftStateSize() {
+			var snap []byte
+			kv.rf.Snapshot(applyMsg.CommandIndex, snap)
+		}
+	}
+}
 
-		// 唤醒等待op执行结果的工作协程
-		kv.Results.SetAndBroadcast(Index(index), op, reply)
+// 拍摄快照
+func (kv *KVServer) Snapshot() []byte {
+	snapshot := new(bytes.Buffer)
+	e := labgob.NewEncoder(snapshot)
+	if err := e.Encode(&kv.Database); err != nil {
+		log.Fatalf("S%d fail to encode database, err:%v\n", kv.me, err)
+	}
+
+	if err := e.Encode(&kv.ITable); err != nil {
+		log.Fatalf("S%d fail to encode ITable, err:%v\n", kv.me, err)
+	}
+
+	return snapshot.Bytes()
+}
+
+// 安装快照
+func (kv *KVServer) InstallSnapshot(snapshot []byte) {
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+
+	if err := d.Decode(&kv.Database); err != nil {
+		log.Fatalf("S%d fail to decode database, err:%v\n", kv.me, err)
+	}
+
+	if err := d.Decode(&kv.ITable); err != nil {
+		log.Fatalf("S%d fail to decode ITable, err:%v\n", kv.me, err)
 	}
 }

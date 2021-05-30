@@ -102,15 +102,15 @@ func (rf *Raft) readPersist() {
 		d := labgob.NewDecoder(r)
 
 		if err := d.Decode(&rf.CurrentTerm); err != nil {
-			log.Fatalf("fail to read CurrentTerm, err:%v\n", err)
+			log.Fatalf("R%d fail to read CurrentTerm, err:%v\n", rf.me, err)
 		}
 
 		if err := d.Decode(&rf.VotedFor); err != nil {
-			log.Fatalf("fail to read VotedFor, err:%v\n", err)
+			log.Fatalf("R%d fail to read VotedFor, err:%v\n", rf.me, err)
 		}
 
 		if err := d.Decode(&rf.Log); err != nil {
-			log.Fatalf("fail to read Log, err:%v\n", err)
+			log.Fatalf("R%d fail to read Log, err:%v\n", rf.me, err)
 		}
 
 		if rf.persister.SnapshotSize() > 0 {
@@ -120,7 +120,7 @@ func (rf *Raft) readPersist() {
 			var entry Entry
 
 			if err := d.Decode(&entry); err != nil {
-				log.Fatalf("fail to read snapshot, err:%v\n", err)
+				log.Fatalf("R%d fail to read snapshot, err:%v\n", rf.me, err)
 			}
 			rf.Log = append([]Entry{entry}, rf.Log...) // 保证快照是Log的第一个条目
 		}
