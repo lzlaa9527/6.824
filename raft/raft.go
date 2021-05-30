@@ -125,6 +125,10 @@ func (rf *Raft) readPersist() {
 			rf.Log = append([]Entry{entry}, rf.Log...) // 保证快照是Log的第一个条目
 		}
 
+		for i := 0; i < len(rf.Log); i++ {
+			rf.Log[i].ApplyMsg.DupCommitted = true
+		}
+
 		// 读取快照之后设置SnapshotIndex，如果没有快照SnapshotIndex=0
 		rf.RWLog.SnapshotIndex = rf.Log[0].SnapshotIndex
 	}
