@@ -20,24 +20,26 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.ClerkID = ClerkID
 	ClerkID++
 
-	Debug(dClient, "C%d init.", ck.ClerkID)
+	Debug(dClient, "[*] C%d init.", ck.ClerkID)
 	return ck
 }
 
 func (ck *Clerk) Get(key string) string {
 
 	arg := &GetArgs{
-		Key: key,
+		Key:     key,
+		ClerkID: ck.ClerkID,
 	}
 
-	reply := &GetReply{}
 	for {
+		Debug(dClient, "[*] C%d SEND GET_REQ TO S%d", ck.ClerkID, ck.leaderID)
+		reply := &GetReply{}
 		ok := ck.servers[ck.leaderID].Call("KVServer.Get", arg, reply)
 		if !ok {
 			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
 			continue
 		}
-		Debug(dClient, "C%d GET REPLY:%+v", reply)
+		Debug(dClient, "[*] C%d RECEIVE REPLY:%+v", ck.ClerkID, reply)
 		switch reply.Err {
 		case OK:
 			return reply.Value
@@ -51,21 +53,21 @@ func (ck *Clerk) Get(key string) string {
 
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	arg := &PutAppendArgs{
+		ClerkID: ck.ClerkID,
 		Key:     key,
 		Value:   value,
-		Op:      op,
-
+		Kind:    op,
 	}
 
-
-	reply := &PutAppendReply{}
 	for {
+		Debug(dClient, "[*] C%d SEND PA_REQ TO S%d", ck.ClerkID, ck.leaderID)
+		reply := &PutAppendReply{}
 		ok := ck.servers[ck.leaderID].Call("KVServer.PutAppend", arg, reply)
 		if !ok {
 			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
 			continue
 		}
-		Debug(dClient, "C%d PA REPLY:%+v", reply)
+		Debug(dClient, "[*] C%d PA REPLY:%+v", ck.ClerkID, reply)
 		switch reply.Err {
 		case OK:
 			return
