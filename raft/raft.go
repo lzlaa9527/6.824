@@ -60,12 +60,10 @@ func (rf *Raft) persist() {
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.Log) // 这里包含日志条目与快照
 	state := w.Bytes()
-	rf.persister.SaveRaftState(state)
 
 	// 测试代码的需要：单独存储快照
 	// 因为快照存储在Log中，因此不单独存储快照也可以
@@ -75,6 +73,8 @@ func (rf *Raft) persist() {
 		e.Encode(rf.Log[0])
 		snapshot := w.Bytes()
 		rf.persister.SaveStateAndSnapshot(state, snapshot)
+	} else {
+		rf.persister.SaveRaftState(state)
 	}
 	Debug(dPersist, "[%d] R%d SAVE STATE, VF:%d, SI:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.SnapshotIndex, rf.RWLog.String())
 
@@ -141,8 +141,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:     term,
 			Index:    index,
 		})
-		rf.RWLog.mu.Unlock()
 		Debug(dClient, "[%d] R%d APPEND ENTRY. IN:%d, TE:%d， CO:%v", rf.CurrentTerm, rf.me, index, rf.Log[index-rf.RWLog.SnapshotIndex].Term, command)
+		rf.RWLog.mu.Unlock()
 		rf.resetTimer()
 
 	})
@@ -201,6 +201,7 @@ func (rf *Raft) ticker() {
 		case <-rf.dead:
 			Debug(dKill, "[%d] R%d BE KILLED", rf.CurrentTerm, rf.me)
 			close(rf.done) // 通知所有的工作协程退出
+			close(rf.applyCh)
 			rf.timer.Stop()
 			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
 			return
@@ -230,7 +231,6 @@ func (rf *Raft) ticker() {
 		rf.RWLog.mu.RLock()
 		rf.persist()
 		rf.RWLog.mu.RUnlock()
-
 
 		// 执行后续动作
 		// 在ticker协程中对状态的读操作不存在读写冲突，没有必要加锁
