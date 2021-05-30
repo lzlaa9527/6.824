@@ -3,6 +3,7 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
+	"log"
 	"math/rand"
 	"sync"
 	"time"
@@ -60,21 +61,22 @@ func (rf *Raft) persist() {
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VotedFor)
-	e.Encode(rf.Log) // 这里包含日志条目与快照
-	state := w.Bytes()
-	rf.persister.SaveRaftState(state)
 
-	// 测试代码的需要：单独存储快照
-	// 因为快照存储在Log中，因此不单独存储快照也可以
-	if rf.Log[0].SnapshotValid {
+	if rf.Log[0].SnapshotValid { // 存储日志条目与快照
+		e.Encode(rf.Log[1:]) // 这里仅包含日志条目
+		state := w.Bytes()
+
 		w = new(bytes.Buffer)
 		e = labgob.NewEncoder(w)
 		e.Encode(rf.Log[0])
 		snapshot := w.Bytes()
 		rf.persister.SaveStateAndSnapshot(state, snapshot)
+	} else { // 这里仅存储日志条目
+		e.Encode(rf.Log)
+		state := w.Bytes()
+		rf.persister.SaveRaftState(state)
 	}
 	Debug(dPersist, "[%d] R%d SAVE STATE, VF:%d, SI:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.SnapshotIndex, rf.RWLog.String())
 
@@ -100,16 +102,29 @@ func (rf *Raft) readPersist() {
 		d := labgob.NewDecoder(r)
 
 		if err := d.Decode(&rf.CurrentTerm); err != nil {
-			Debug(dError, "R%d Read CT failed, err:%v", rf.me, err)
+			log.Fatalf("fail to read CurrentTerm, err:%v\n", err)
 		}
 
 		if err := d.Decode(&rf.VotedFor); err != nil {
-			Debug(dError, "R%d Read VF failed, err:%v", rf.me, err)
+			log.Fatalf("fail to read VotedFor, err:%v\n", err)
 		}
 
 		if err := d.Decode(&rf.Log); err != nil {
-			Debug(dError, "R%d Read LOG failed, err:%v", rf.me, err)
+			log.Fatalf("fail to read Log, err:%v\n", err)
 		}
+
+		if rf.persister.SnapshotSize() > 0 {
+			snapshot := rf.persister.ReadSnapshot()
+			r := bytes.NewBuffer(snapshot)
+			d := labgob.NewDecoder(r)
+			var entry Entry
+
+			if err := d.Decode(&entry); err != nil {
+				log.Fatalf("fail to read snapshot, err:%v\n", err)
+			}
+			rf.Log = append([]Entry{entry}, rf.Log...) // 保证快照是Log的第一个条目
+		}
+
 		// 读取快照之后设置SnapshotIndex，如果没有快照SnapshotIndex=0
 		rf.RWLog.SnapshotIndex = rf.Log[0].SnapshotIndex
 	}
@@ -141,8 +156,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:     term,
 			Index:    index,
 		})
-		rf.RWLog.mu.Unlock()
 		Debug(dClient, "[%d] R%d APPEND ENTRY. IN:%d, TE:%d， CO:%v", rf.CurrentTerm, rf.me, index, rf.Log[index-rf.RWLog.SnapshotIndex].Term, command)
+		rf.RWLog.mu.Unlock()
 		rf.resetTimer()
 
 	})
@@ -201,6 +216,7 @@ func (rf *Raft) ticker() {
 		case <-rf.dead:
 			Debug(dKill, "[%d] R%d BE KILLED", rf.CurrentTerm, rf.me)
 			close(rf.done) // 通知所有的工作协程退出
+			close(rf.applyCh)
 			rf.timer.Stop()
 			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
 			return
@@ -230,7 +246,6 @@ func (rf *Raft) ticker() {
 		rf.RWLog.mu.RLock()
 		rf.persist()
 		rf.RWLog.mu.RUnlock()
-
 
 		// 执行后续动作
 		// 在ticker协程中对状态的读操作不存在读写冲突，没有必要加锁

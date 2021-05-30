@@ -8,94 +8,6 @@ import (
 	"sync/atomic"
 )
 
-type signal struct{}
-
-type Result struct {
-	s     chan signal
-	op    Op
-	reply interface{}
-}
-
-type Index int
-
-// 存储 raft Index处对应的Op，及其执行结果
-type Results map[Index]*Result
-
-// 阻塞在i处的Op对应的signal channel上，并在被唤醒后获取到Op以及对应的Result
-// 当Op被执行之后applier协程通过关闭该signal channel通知阻塞的工作协程
-// 如果调用协程是第一个调用者，首先初始化该signal
-func (r Results) Wait(i Index) *Result {
-	ret, ok := r[i]
-	if ok == false {
-		r[i] = &Result{
-			s: make(chan signal),
-		}
-		ret = r[i]
-		<-ret.s
-	} else {
-		<-ret.s
-	}
-	return ret
-}
-
-func (r Results) SetAndBroadcast(i Index, op Op, re interface{}) {
-	ret, ok := r[i]
-	if !ok { // 没有等待该Op的工作协程，直接返回
-		return
-	}
-	ret.op = op
-	// 设置op的执行结果
-	ret.reply = re
-	// 唤醒等待协程
-	close(ret.s)
-}
-
-func (r Results) Delete(i Index) {
-	delete(r, i)
-}
-
-// 每一个Client的Op都有一个唯一标识符Identifier
-// ClerkID	标识Client ID
-// Seq		标识Client下一个Op的序号
-type Identifier struct {
-	ClerkID int
-	Seq     int
-}
-
-// ITable是Server记录目前各个Client待提交Op的Seq的哈希表
-// 关键字是Client的ClerkID
-// 值是该Client目前待提交的Seq
-type ITable map[int]int
-
-// 返回clerkID对应Client的可用的Op标识符
-func (itable ITable) GetIdentifier(clerkID int) Identifier {
-
-	return Identifier{
-		ClerkID: clerkID,
-		Seq:     itable[clerkID],
-	}
-}
-
-// 更新clerkID对应Client的下一个Op标识符
-func (itable ITable) UpdateIdentifier(clerkID int) {
-	itable[clerkID]++
-}
-
-// 如果i标识的Op已经被执行过了，Executed返回true
-func (itable ITable) Executed(i Identifier) bool {
-	return i.Seq < itable[i.ClerkID]
-}
-
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-	Kind  string
-	Key   string
-	Value string
-	ID    Identifier
-}
-
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -106,17 +18,19 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	ITable // 用来记录每个客户端已经处理了的Op序列号
-	Results
-	Database // 数据库
+	ITable        // 记录每个客户端已经处理了的Op序列号，二元组：(ClerkID, OpSeq)是客户端Op的唯一标识符
+	OpResults     //
+	Database      // 数据库
+	OpIndex   int // 已经处理的op序列号，初始化为1
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	clerkID := args.ClerkID
 	op := Op{
-		Kind: "Get",
-		Key:  args.Key,
+		ServerID: kv.me,
+		Kind:     "Get",
+		Key:      args.Key,
 
 		// GetIdentifier(clerkID)获取clerkID对应的客户端下一个Op对应的Seq
 		ID: kv.GetIdentifier(clerkID),
@@ -130,13 +44,44 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		Debug(dServer, "[*] S%d NOT LEADER.", kv.me)
 		return
 	}
-
-	Debug(dServer, "[*] S%d SEND MSG TO RAFT.", kv.me)
+	Debug(dServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
 
 	ret, err := kv.waitAndMatch(index, op)
+	Debug(dServer, "[*] S%d GET REPLY, SEQ: %d.", kv.me, index)
 	if ret != nil {
 		reply.Err = ret.(*GetReply).Err
 		reply.Value = ret.(*GetReply).Value
+	} else {
+		reply.Err = err
+	}
+}
+
+func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+
+	clerkID := args.ClerkID
+
+	op := Op{
+		ServerID: kv.me,
+		Kind:     args.Kind,
+		Key:      args.Key,
+		Value:    args.Value,
+		// GetIdentifier(clerkID)获取clerkID对应的客户端下一个Op对应的Seq
+		ID: kv.GetIdentifier(clerkID),
+	}
+
+	Debug(dServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		Debug(dServer, "[*] S%d NOT LEADER.", kv.me)
+		return
+	}
+	Debug(dServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
+
+	ret, err := kv.waitAndMatch(index, op)
+	Debug(dServer, "[*] S%d GET REPLY, SEQ: %d.", kv.me, index)
+	if ret != nil {
+		reply.Err = ret.(*PutAppendReply).Err
 	} else {
 		reply.Err = err
 	}
@@ -148,45 +93,15 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 //
 func (kv *KVServer) waitAndMatch(index int, reqOp Op) (interface{}, Err) {
 
-	result := kv.Results.Wait(Index(index))
+	result := kv.OpResults.Wait(Index(index))
 	resOp := result.op // raft所提交日志中的ApplyMsg
 
 	// leadership 发生变更，或者原先提交的请求被覆盖时index处的 resOp != reqOp
 	if resOp != reqOp {
 		return nil, ErrWrongLeader
 	}
-	kv.Results.Delete(Index(index)) // 为了节约内存及时删除缓存
+	kv.OpResults.Delete(Index(index)) // 为了节约内存及时删除缓存
 	return result.reply, ""
-}
-
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-
-	clerkID := args.ClerkID
-
-	op := Op{
-		Kind:  args.Kind,
-		Key:   args.Key,
-		Value: args.Value,
-		// GetIdentifier(clerkID)获取clerkID对应的客户端下一个Op对应的Seq
-		ID: kv.GetIdentifier(clerkID),
-	}
-
-	Debug(dServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
-
-	index, _, isLeader := kv.rf.Start(op)
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		Debug(dServer, "[*] S%d NOT LEADER.", kv.me)
-		return
-	}
-
-	Debug(dServer, "[*] S%d SEND MSG TO RAFT.", kv.me)
-	ret, err := kv.waitAndMatch(index, op)
-	if ret != nil {
-		reply.Err = ret.(*PutAppendReply).Err
-	} else {
-		reply.Err = err
-	}
 }
 
 //
@@ -202,6 +117,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
+	kv.OpResults.Destory()
+	close(kv.applyCh)
 	// Your code here, if desired.
 }
 
@@ -240,7 +157,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.ITable = make(ITable)
-	kv.Results = make(Results)
+	kv.OpResults = OpResults{
+		table: make(map[Index]*OpResult),
+		mu:    new(sync.Mutex),
+	}
 	kv.Database = make(Database)
 
 	go kv.applier()
@@ -255,6 +175,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 // 如果不是，执行并返回结果，同时更新对应Client下一个Op的标识符
 func (kv *KVServer) applier() {
 	for msg := range kv.applyCh {
+		if kv.killed() {
+			return
+		}
+
+
+
 		Debug(dServer, "[*] S%d RECEIVE MSG:%+v", kv.me, msg)
 		if !msg.CommandValid {
 			continue
@@ -282,9 +208,8 @@ func (kv *KVServer) applier() {
 			reply = kv.Database.Append(op.Key, op.Value)
 		}
 
-		Debug(dServer, "[*] S%d HANDLE OP:%+v, REPLY:%+v", kv.me, op, reply)
-
 		// 唤醒等待op执行结果的工作协程
-		kv.Results.SetAndBroadcast(Index(index), op, reply)
+		kv.OpResults.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me)
+		Debug(dServer, "[*] S%d HANDLE OP:%+v, REPLY:%+v", kv.me, op, reply)
 	}
 }
