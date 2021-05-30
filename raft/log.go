@@ -27,6 +27,11 @@ type ApplyMsg struct {
 	SnapshotTerm  int
 	SnapshotIndex int
 	SnapshotValid bool // true，该条目是快照
+
+	// DupCommitted为true，标识该日志条目被提交过；否则是首次提交
+	// 当raft宕机之后，持久化的快照和日志会再次被提交，此时的快照/日志的
+	// DupCommitted标记为true
+	DupCommitted bool
 }
 
 type Entry struct {
