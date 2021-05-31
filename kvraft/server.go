@@ -20,22 +20,22 @@ type KVServer struct {
 	maxraftstate int
 
 	// Your definitions here.
-	ITable        // 记录每个客户端已经处理了的Op序列号，二元组：(ClerkID, OpSeq)是客户端Op的唯一标识符
-	OpResults     // 存储server已经处理的Op及其结果
-	Database      // 数据库
-	OpIndex   int // 已经处理的op序列号，初始化为1
+	OpReplys // 存储server已经处理的Op及其结果
+	ITable   // 记录每个客户端待处理的Op二元组标识符：(ClerkID, OpSeq)；需要持久化保存
+	Database // 数据库；需要持久化保存
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
-	clerkID := args.ClerkID
 	op := Op{
 		ServerID: kv.me,
 		Kind:     "Get",
 		Key:      args.Key,
 
-		// GetIdentifier(clerkID)获取clerkID对应的客户端下一个Op对应的Seq
-		ID: kv.GetIdentifier(clerkID),
+		ID: Identifier{
+			ClerkID: args.ClerkID,
+			Seq:     args.OpSeq,
+		},
 	}
 	Debug(dServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
 
@@ -60,15 +60,15 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
-	clerkID := args.ClerkID
-
 	op := Op{
 		ServerID: kv.me,
 		Kind:     args.Kind,
 		Key:      args.Key,
 		Value:    args.Value,
-		// GetIdentifier(clerkID)获取clerkID对应的客户端下一个Op对应的Seq
-		ID: kv.GetIdentifier(clerkID),
+		ID: Identifier{
+			ClerkID: args.ClerkID,
+			Seq:     args.OpSeq,
+		},
 	}
 
 	Debug(dServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
@@ -96,32 +96,22 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 //
 func (kv *KVServer) waitAndMatch(index int, reqOp Op) (interface{}, Err) {
 
-	result := kv.OpResults.Wait(Index(index))
+	result := kv.OpReplys.Wait(Index(index))
 	resOp := result.op // raft所提交日志中的ApplyMsg
 
 	// leadership 发生变更，或者原先提交的请求被覆盖时index处的 resOp != reqOp
 	if resOp != reqOp {
 		return nil, ErrWrongLeader
 	}
-	kv.OpResults.Delete(Index(index)) // 为了节约内存及时删除缓存
+	kv.OpReplys.Delete(Index(index)) // 为了节约内存及时删除缓存
 	return result.reply, ""
 }
 
-//
-// the tester calls Kill() when a KVServer instance won't
-// be needed again. for your convenience, we supply
-// code to set rf.dead (without needing a lock),
-// and a killed() method to test rf.dead in
-// long-running loops. you can also add your own
-// code to Kill(). you're not required to do anything
-// about this, but it may be convenient (for example)
-// to suppress debug output from a Kill()ed instance.
-//
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
-	kv.OpResults.Destory() // 通知尚未退出的clerk退出
-	close(kv.applyCh)      // 通知applier协程退出
+	kv.OpReplys.Destory() // 通知尚未退出的clerk退出
+	close(kv.applyCh)     // 通知applier协程退出
 }
 
 func (kv *KVServer) killed() bool {
@@ -129,20 +119,6 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-//
-// servers[] contains the ports of the set of
-// servers that will cooperate via Raft to
-// form the fault-tolerant key/msg service.
-// me is the index of the current server in servers[].
-// the k/v server should store snapshots through the underlying Raft
-// implementation, which should call persister.SaveStateAndSnapshot() to
-// atomically save the Raft state along with the snapshot.
-// the k/v server should snapshot when Raft's saved state exceeds maxraftstate bytes,
-// in order to allow Raft to garbage-collect its log. if maxraftstate is -1,
-// you don't need to snapshot.
-// StartKVServer() must return quickly, so it should start goroutines
-// for any long-running work.
-//
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
@@ -158,9 +134,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.ITable = make(ITable)
-	kv.OpResults = OpResults{
-		table: make(map[Index]*OpResult),
+	kv.ITable = ITable{
+		seqTable:   make(map[int]int),
+		replyTable: make(map[int]interface{}),
+	}
+	kv.OpReplys = OpReplys{
+		table: make(map[Index]*SignalWithOpReply),
 		mu:    new(sync.Mutex),
 	}
 	kv.Database = make(Database)
@@ -181,6 +160,12 @@ func (kv *KVServer) applier() {
 			return
 		}
 
+		// 通知raft进行snapshot
+		if kv.maxraftstate <= kv.rf.RaftStateSize() {
+			var snap []byte
+			kv.rf.Snapshot(applyMsg.CommandIndex, snap)
+		}
+
 		Debug(dServer, "[*] S%d RECEIVE MSG:%+v", kv.me, applyMsg)
 
 		if applyMsg.SnapshotValid { // 应用snapshot
@@ -193,14 +178,12 @@ func (kv *KVServer) applier() {
 			identifier := op.ID
 			index := applyMsg.CommandIndex
 
-			// 忽略唯一标识符重复的op
-			// 避免因为leadership变更，导致一个op重复执行
+			// 避免重复执行同一个op
 			if kv.ITable.Executed(identifier) {
+				reply := kv.ITable.GetCacheReply(op.ID.ClerkID)
+				kv.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.Replay)
 				continue
 			}
-
-			// 更新clerkID对应的Client的下一个Op的Seq
-			kv.ITable.UpdateIdentifier(identifier.ClerkID)
 
 			var reply interface{}
 			// 执行对应的命令
@@ -213,20 +196,18 @@ func (kv *KVServer) applier() {
 				reply = kv.Database.Append(op.Key, op.Value)
 			}
 
+			// 更新clerkID对应的Client的下一个待执行Op的Seq
+			kv.ITable.UpdateIdentifier(identifier.ClerkID, identifier.Seq+1, reply)
+
 			// 唤醒等待op执行结果的clerk协程。
 			// 如果op.ServerID == kv.me说明该op是通过当前Server提交的，并且
-			// 当applyMsg.DupCommitted == false时说明该op是在server重启后提交的。
+			// 当applyMsg.Replay == false时说明该op是在server重启后提交的。
 			//
 			// 重启前提交的op需要被重放，但是不存在clerk协程等待server重启前提交的op。
-			kv.OpResults.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.DupCommitted)
+			kv.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.Replay)
 			Debug(dServer, "[*] S%d HANDLE OP:%+v, REPLY:%+v", kv.me, op, reply)
 		}
 
-		// 通知raft进行snapshot
-		if kv.maxraftstate <= kv.rf.RaftStateSize() {
-			var snap []byte
-			kv.rf.Snapshot(applyMsg.CommandIndex, snap)
-		}
 	}
 }
 

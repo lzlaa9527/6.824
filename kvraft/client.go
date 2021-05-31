@@ -9,6 +9,7 @@ type Clerk struct {
 	// You will have to modify this struct.
 	leaderID int // 目前所知的leader ID
 	ClerkID  int
+	OpSeq    int // clerk下一个Op使用的sequence number
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
@@ -29,7 +30,9 @@ func (ck *Clerk) Get(key string) string {
 	arg := &GetArgs{
 		Key:     key,
 		ClerkID: ck.ClerkID,
+		OpSeq:   ck.OpSeq,
 	}
+	ck.OpSeq++
 
 	for {
 		Debug(dClient, "[*] C%d SEND GET_REQ TO S%d", ck.ClerkID, ck.leaderID)
@@ -54,10 +57,12 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	arg := &PutAppendArgs{
 		ClerkID: ck.ClerkID,
+		OpSeq:   ck.OpSeq,
 		Key:     key,
 		Value:   value,
 		Kind:    op,
 	}
+	ck.OpSeq++
 
 	for {
 		Debug(dClient, "[*] C%d SEND PA_REQ TO S%d", ck.ClerkID, ck.leaderID)
