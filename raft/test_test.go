@@ -8,9 +8,7 @@ package raft
 // test with the original before submitting.
 //
 
-import (
-	"testing"
-)
+import "testing"
 import "fmt"
 import "time"
 import "math/rand"
@@ -62,32 +60,32 @@ func TestReElection2A(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
-	Debug(DTest, "[*] S%d disconnect", leader1)
+	Debug(dTest, "[*] S%d disconnect", leader1)
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
-	Debug(DTest, "[*] S%d connect", leader1)
+	Debug(dTest, "[*] S%d connect", leader1)
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no leader should
 	// be elected.
-	Debug(DTest, "[*] S%d disconnect", leader2)
+	Debug(dTest, "[*] S%d disconnect", leader2)
 	cfg.disconnect(leader2)
-	Debug(DTest, "[*] S%d disconnect", (leader2+1)%servers)
+	Debug(dTest, "[*] S%d disconnect", (leader2+1)%servers)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
-	Debug(DTest, "[*] S%d connect", (leader2+1)%servers)
+	Debug(dTest, "[*] S%d connect", (leader2+1)%servers)
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
-	Debug(DTest, "[*] S%d connect", leader2)
+	Debug(dTest, "[*] S%d connect", leader2)
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
 
@@ -109,22 +107,22 @@ func TestManyElections2A(t *testing.T) {
 		i1 := rand.Int() % servers
 		i2 := rand.Int() % servers
 		i3 := rand.Int() % servers
-		Debug(DTest, "[*] S%d disconnect", i1)
+		Debug(dTest, "[*] S%d disconnect", i1)
 		cfg.disconnect(i1)
-		Debug(DTest, "[*] S%d disconnect", i2)
+		Debug(dTest, "[*] S%d disconnect", i2)
 		cfg.disconnect(i2)
-		Debug(DTest, "[*] S%d disconnect", i3)
+		Debug(dTest, "[*] S%d disconnect", i3)
 		cfg.disconnect(i3)
 
 		// either the current leader should still be alive,
 		// or the remaining four should elect a new one.
 		cfg.checkOneLeader()
 
-		Debug(DTest, "[*] S%d connect", i1)
+		Debug(dTest, "[*] S%d connect", i1)
 		cfg.connect(i1)
-		Debug(DTest, "[*] S%d connect", i2)
+		Debug(dTest, "[*] S%d connect", i2)
 		cfg.connect(i2)
-		Debug(DTest, "[*] S%d connect", i3)
+		Debug(dTest, "[*] S%d connect", i3)
 		cfg.connect(i3)
 	}
 
@@ -202,7 +200,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
-	Debug(DTest, "[*] S%d disconnect", (leader+1)%servers)
+	Debug(dTest, "[*] S%d disconnect", (leader+1)%servers)
 	cfg.disconnect((leader + 1) % servers)
 
 	// the leader and remaining follower should be
@@ -215,7 +213,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
-	Debug(DTest, "[*] S%d connect", (leader+1)%servers)
+	Debug(dTest, "[*] S%d connect", (leader+1)%servers)
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree
@@ -613,39 +611,39 @@ func TestPersist12C(t *testing.T) {
 		cfg.start1(i, cfg.applier)
 	}
 	for i := 0; i < servers; i++ {
-		Debug(DTest, "[*] S%d disconnect", i)
+		Debug(dTest, "[*] S%d disconnect", i)
 		cfg.disconnect(i)
-		Debug(DTest, "[*] S%d connect", i)
+		Debug(dTest, "[*] S%d connect", i)
 		cfg.connect(i)
 	}
 
 	cfg.one(12, servers, true)
 
 	leader1 := cfg.checkOneLeader()
-	Debug(DTest, "[*] S%d disconnect", leader1)
+	Debug(dTest, "[*] S%d disconnect", leader1)
 	cfg.disconnect(leader1)
 	cfg.start1(leader1, cfg.applier)
-	Debug(DTest, "[*] S%d connect", leader1)
+	Debug(dTest, "[*] S%d connect", leader1)
 	cfg.connect(leader1)
 
 	cfg.one(13, servers, true)
 
 	leader2 := cfg.checkOneLeader()
-	Debug(DTest, "[*] S%d disconnect", leader2)
+	Debug(dTest, "[*] S%d disconnect", leader2)
 	cfg.disconnect(leader2)
 	cfg.one(14, servers-1, true)
 	cfg.start1(leader2, cfg.applier)
-	Debug(DTest, "[*] S%d connect", leader2)
+	Debug(dTest, "[*] S%d connect", leader2)
 	cfg.connect(leader2)
 
 	cfg.wait(4, servers, -1) // wait for leader2 to join before killing i3
 
 	i3 := (cfg.checkOneLeader() + 1) % servers
-	Debug(DTest, "[*] S%d disconnect", i3)
+	Debug(dTest, "[*] S%d disconnect", i3)
 	cfg.disconnect(i3)
 	cfg.one(15, servers-1, true)
 	cfg.start1(i3, cfg.applier)
-	Debug(DTest, "[*] S%d connect", i3)
+	Debug(dTest, "[*] S%d connect", i3)
 	cfg.connect(i3)
 
 	cfg.one(16, servers, true)
@@ -856,7 +854,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
-			Debug(DTest, "[*] S%d - leader disconnect", leader)
+			Debug(dTest, "[*] S%d - leader disconnect", leader)
 			cfg.disconnect(leader)
 			nup -= 1
 		}
@@ -864,17 +862,17 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
-				Debug(DTest, "[*] S%d - connect", s)
+				Debug(dTest, "[*] S%d - connect", s)
 				cfg.connect(s)
 				nup += 1
 			}
 		}
 	}
 
-	Debug(DError, "[*] S0 ======================== ")
+	Debug(dError, "[*] S0 ======================== ")
 	for i := 0; i < servers; i++ {
 		if cfg.connected[i] == false {
-			Debug(DTest, "[*] S%d - connect", i)
+			Debug(dTest, "[*] S%d - connect", i)
 			cfg.connect(i)
 		}
 	}
@@ -955,7 +953,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 	for iters := 0; iters < 20; iters++ {
 		if (rand.Int() % 1000) < 200 {
 			i := rand.Int() % servers
-			Debug(DTest, "[*] S%d disconnect", i)
+			Debug(dTest, "[*] S%d disconnect", i)
 			cfg.disconnect(i)
 		}
 
@@ -964,7 +962,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 			if cfg.rafts[i] == nil {
 				cfg.start1(i, cfg.applier)
 			}
-			Debug(DTest, "[*] S%d connect", i)
+			Debug(dTest, "[*] S%d connect", i)
 			cfg.connect(i)
 		}
 
@@ -988,7 +986,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 		if cfg.rafts[i] == nil {
 			cfg.start1(i, cfg.applier)
 		}
-		Debug(DTest, "[*] S%d connect", i)
+		Debug(dTest, "[*] S%d connect", i)
 		cfg.connect(i)
 	}
 
@@ -1062,7 +1060,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 
 		if disconnect {
-			Debug(DTest, "[*] S%d DISCONNECT", victim)
+			Debug(dTest, "[*] S%d DISCONNECT", victim)
 			cfg.disconnect(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
@@ -1083,7 +1081,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		if disconnect {
 			// reconnect a follower, who maybe behind and
 			// needs to rceive a _Snapshot to catch up.
-			Debug(DTest, "[*] S%d CONNECT", victim)
+			Debug(dTest, "[*] S%d CONNECT", victim)
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()

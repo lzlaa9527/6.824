@@ -12,19 +12,19 @@ import (
 type logTopic string
 
 const (
-	DClient  logTopic = "CLNT" // 客户端请求
-	DCommit  logTopic = "CMIT" // 提交日志
-	DKill    logTopic = "KILL" // server宕机
-	DAppend  logTopic = "APET" // AE RPC
-	DPersist logTopic = "PERS" // 持久化操作
-	DTimer   logTopic = "TIMR" // 定时器操作
-	DVote    logTopic = "VOTE" // RV RPC
-	DSnap    logTopic = "SNAP" // 快照
-	DTerm    logTopic = "TERM" // 修改任期
-	DTest    logTopic = "TEST" // 测试信息
-	DServer  logTopic = "SEVE"
-	DError   logTopic = "ERRO"
-	DWarn    logTopic = "WARN"
+	dClient  logTopic = "CLNT" // 客户端请求
+	dCommit  logTopic = "CMIT" // 提交日志
+	dKill    logTopic = "KILL" // server宕机
+	dAppend  logTopic = "APET" // AE RPC
+	dPersist logTopic = "PERS" // 持久化操作
+	dTimer   logTopic = "TIMR" // 定时器操作
+	dVote    logTopic = "VOTE" // RV RPC
+	dSnap    logTopic = "SNAP" // 快照
+	dTerm    logTopic = "TERM" // 修改任期
+	dTest    logTopic = "TEST" // 测试信息
+	dTrace   logTopic = "TRCE"
+	dError   logTopic = "ERRO"
+	dWarn    logTopic = "WARN"
 )
 
 var debugStart time.Time
@@ -61,6 +61,6 @@ func Debug(topic logTopic, format string, a ...interface{}) {
 	}
 }
 
-func Min(a, b int) int { return int(math.Min(float64(a), float64(b))) }
+func min(a, b int) int { return int(math.Min(float64(a), float64(b))) }
 
-func Max(a, b int) int { return int(math.Max(float64(a), float64(b))) }
+func max(a, b int) int { return int(math.Max(float64(a), float64(b))) }

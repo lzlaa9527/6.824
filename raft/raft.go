@@ -78,7 +78,7 @@ func (rf *Raft) persist() {
 		state := w.Bytes()
 		rf.persister.SaveRaftState(state)
 	}
-	Debug(DPersist, "[%d] R%d SAVE STATE, VF:%d, SI:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.SnapshotIndex, rf.RWLog.String())
+	Debug(dPersist, "[%d] R%d SAVE STATE, VF:%d, SI:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.SnapshotIndex, rf.RWLog.String())
 
 }
 
@@ -89,9 +89,8 @@ func (rf *Raft) readPersist() {
 
 		// 占位
 		rf.Log = append(rf.Log, Entry{
-			ApplyMsg: ApplyMsg{
-			},
-			Term: -1,
+			ApplyMsg: ApplyMsg{},
+			Term:     -1,
 		})
 		return
 	}
@@ -160,7 +159,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:     term,
 			Index:    index,
 		})
-		Debug(DClient, "[%d] R%d APPEND ENTRY. IN:%d, TE:%d， CO:%v", rf.CurrentTerm, rf.me, index, rf.Log[index-rf.RWLog.SnapshotIndex].Term, command)
+		Debug(dClient, "[%d] R%d APPEND ENTRY. IN:%d, TE:%d， CO:%v", rf.CurrentTerm, rf.me, index, rf.Log[index-rf.RWLog.SnapshotIndex].Term, command)
 		rf.RWLog.mu.Unlock()
 		rf.resetTimer()
 
@@ -202,13 +201,13 @@ func (rf *Raft) resetTimer() {
 	case FOLLOWER:
 		ELT := electionTime()
 		rf.timer.Reset(ELT)
-		Debug(DTimer, "[%d] R%d CONVERT FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
+		Debug(dTimer, "[%d] R%d CONVERT FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
 	case CANDIDATE:
 		ELT := electionTime()
 		rf.timer.Reset(ELT)
-		Debug(DTimer, "[%d] R%d CONVERT CANDIDATE, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
+		Debug(dTimer, "[%d] R%d CONVERT CANDIDATE, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
 	case LEADER:
-		Debug(DTimer, "[%d] R%d HEARTBEAT.", rf.CurrentTerm, rf.me)
+		Debug(dTimer, "[%d] R%d HEARTBEAT.", rf.CurrentTerm, rf.me)
 		rf.timer.Reset(HEARTBEAT)
 	}
 }
@@ -218,8 +217,9 @@ func (rf *Raft) ticker() {
 	for {
 		select {
 		case <-rf.dead:
-			Debug(DKill, "[%d] R%d BE KILLED", rf.CurrentTerm, rf.me)
+			Debug(dKill, "[%d] R%d BE KILLED", rf.CurrentTerm, rf.me)
 			close(rf.done) // 通知所有的工作协程退出
+			close(rf.applyCh)
 			rf.timer.Stop()
 			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
 			return
@@ -237,7 +237,7 @@ func (rf *Raft) ticker() {
 				rf.CurrentTerm++
 				rf.VotedFor = rf.me
 				// server的状态发生改变，原来的Image虽之失效
-				Debug(DTimer, "[%d] R%d CLOSE image.done", rf.CurrentTerm, rf.me)
+				Debug(dTimer, "[%d] R%d CLOSE image.done", rf.CurrentTerm, rf.me)
 				close(rf.Image.done)
 				rf.Image.done = make(chan signal)
 			}
@@ -257,6 +257,17 @@ func (rf *Raft) ticker() {
 		case CANDIDATE:
 			rf.sendRequestVote()
 		case LEADER:
+			// leader 任期开始时添加一个空的日志条目 no-op 条目
+			// if rf.Log[len(rf.Log)-1].Term != rf.CurrentTerm {
+			// 	index := len(rf.Log)
+			//
+			// 	rf.Log = append(rf.Log, Entry{
+			// 		ApplyMsg: ApplyMsg{Command: nil, CommandIndex: index},
+			// 		Term:     rf.CurrentTerm,
+			// 	})
+			// 	Debug(dAppend, "[%d] R%d Append Entry. IN:%d, TE:%d", rf.CurrentTerm, rf.me, index, rf.Log[index].Term)
+			// }
+			// rf.timer.Reset(HEARTBEAT)
 			rf.SendAppendEntries()
 		}
 	}
@@ -289,7 +300,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.applier()
 
 	// start ticker goroutine to start elections
-	Debug(DTest, "[%d] R%d START.", rf.CurrentTerm, rf.me)
+	Debug(dTest, "[%d] R%d START.", rf.CurrentTerm, rf.me)
 
 	return rf
 }

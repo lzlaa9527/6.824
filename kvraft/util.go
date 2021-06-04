@@ -12,9 +12,9 @@ import (
 type logTopic string
 
 const (
-	DClient logTopic = "CLNT" // 客户端
-	DServer logTopic = "SEVE" // 服务端
-	DError  logTopic = "ERRO"
+	dClient logTopic = "CLNT" // 客户端
+	dServer logTopic = "SEVE" // 服务端
+	dError  logTopic = "ERRO"
 )
 
 var debugStart time.Time
