@@ -16,6 +16,7 @@ type ShardCtrler struct {
 	// Your data here.
 
 	configs []Config // indexed by config num
+
 }
 
 

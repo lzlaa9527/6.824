@@ -28,7 +28,7 @@ func check(t *testing.T, groups []int, ck *Clerk) {
 		for s, g := range c.Shards {
 			_, ok := c.Groups[g]
 			if ok == false {
-				t.Fatalf("shard %v -> invalid group %v", s, g)
+				t.Fatalf("shards %v -> invalid group %v", s, g)
 			}
 		}
 	}
@@ -165,12 +165,12 @@ func TestBasic(t *testing.T) {
 		for i := 0; i < NShards; i++ {
 			if i < NShards/2 {
 				if cf2.Shards[i] != gid3 {
-					t.Fatalf("expected shard %v on gid %v actually %v",
+					t.Fatalf("expected shards %v on gid %v actually %v",
 						i, gid3, cf2.Shards[i])
 				}
 			} else {
 				if cf2.Shards[i] != gid4 {
-					t.Fatalf("expected shard %v on gid %v actually %v",
+					t.Fatalf("expected shards %v on gid %v actually %v",
 						i, gid4, cf2.Shards[i])
 				}
 			}
