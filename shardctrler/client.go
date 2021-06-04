@@ -6,25 +6,30 @@ package shardctrler
 
 import "6.824/labrpc"
 import "time"
-import "crypto/rand"
-import "math/big"
+
+var ClerkID int
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+
+	leaderID int // 目前所知的leader ID
+	ClerkID  int
+	OpSeq    int // clerk下一个Op使用的sequence number
 }
 
-func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
-	return x
-}
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+
+	ck.leaderID = 0
+
+	ck.ClerkID = ClerkID
+	ClerkID++
+
+	Debug(dClient, "[*] Shardctrler clerk%d init.", ck.ClerkID)
 	return ck
 }
 

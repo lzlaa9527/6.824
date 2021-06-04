@@ -47,13 +47,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		currentTerm = image.CurrentTerm
 		leaderID    = args.LeaderId
 	)
-	reply.Term = max(term, currentTerm) // 响应的term一定是较大值
+	reply.Term = Max(term, currentTerm) // 响应的term一定是较大值
 
-	Debug(dAppend, "[%d] R%d RECEIVE<- R%d AE,T:%d HAS:%v PLI:%d PLT:%d, LLI:%d, LLT:%d LEN:%d", currentTerm, me, leaderID, term, args.HasSnapshot, args.PrevLogIndex, args.PrevLogTerm, args.LastIncludeIndex, args.LastIncludeTerm, len(args.Log))
+	Debug(DAppend, "[%d] R%d RECEIVE<- R%d AE,T:%d HAS:%v PLI:%d PLT:%d, LLI:%d, LLT:%d LEN:%d", currentTerm, me, leaderID, term, args.HasSnapshot, args.PrevLogIndex, args.PrevLogTerm, args.LastIncludeIndex, args.LastIncludeTerm, len(args.Log))
 
 	if term < currentTerm {
 		reply.Success = false
-		Debug(dAppend, "[%d] R%d REFUSE <- R%d, LOWER TERM.", currentTerm, me, leaderID)
+		Debug(DAppend, "[%d] R%d REFUSE <- R%d, LOWER TERM.", currentTerm, me, leaderID)
 		reply.Valid = true
 		return
 	}
@@ -74,7 +74,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		image = *i
 
 		currentTerm = image.CurrentTerm
-		Debug(dAppend, "[%d] R%d CONVERT FOLLOWER <- R%d.", term, me, leaderID)
+		Debug(DAppend, "[%d] R%d CONVERT FOLLOWER <- R%d.", term, me, leaderID)
 		i.resetTimer() // 重置计时器
 	})
 
@@ -113,7 +113,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if prevLogIndex < 0 { // FOLLOWER日志中不存在prevLogIndex执行的日志条目
 			offset := -prevLogIndex - 1  // FOLLOWER日志的第一个条目在RPC日志中的位置
 			if offset >= len(args.Log) { // RPC中所有的日志都是过时的
-				Debug(dAppend, "[%d] R%d REFUSE <- R%d, OLD LOG", currentTerm, me, leaderID)
+				Debug(DAppend, "[%d] R%d REFUSE <- R%d, OLD LOG", currentTerm, me, leaderID)
 				reply.Success = true
 				return
 			}
@@ -127,7 +127,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				reply.ConflictIndex = len(rf.Log)
 				reply.ConflictTerm = -1
 				reply.Success = false
-				Debug(dAppend, "[%d] R%d REFUSE <- R%d, CONFLICT", currentTerm, me, leaderID)
+				Debug(DAppend, "[%d] R%d REFUSE <- R%d, CONFLICT", currentTerm, me, leaderID)
 				return
 			}
 
@@ -137,14 +137,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				reply.ConflictTerm = rf.Log[prevLogIndex].Term
 
 				// 找到首个term为ConflictTerm的ConflictIndex
-				for reply.ConflictIndex = prevLogIndex; rf.Log[reply.ConflictIndex].Term == reply.ConflictTerm; reply.ConflictIndex-- {
+				for reply.ConflictIndex = prevLogIndex; reply.ConflictIndex >= 0 && rf.Log[reply.ConflictIndex].Term == reply.ConflictTerm; reply.ConflictIndex-- {
 				}
 
 				reply.ConflictIndex++
 				// ConflictIndex的绝对索引
 				reply.ConflictIndex += rf.RWLog.SnapshotIndex
 
-				Debug(dAppend, "[%d] R%d REFUSE <- R%d, CONFLICT", currentTerm, me, leaderID)
+				Debug(DAppend, "[%d] R%d REFUSE <- R%d, CONFLICT", currentTerm, me, leaderID)
 				return
 			}
 			i, j = prevLogIndex+1, 0
@@ -157,7 +157,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 			lastIncludeIndex = -lastIncludeIndex   // FOLLOWER日志第一个条目在RPC日志的位置
 			if lastIncludeIndex >= len(args.Log) { // 所有的日志条目都是过时的
-				Debug(dAppend, "[%d] R%d REFUSE <- R%d, OLD LOG", currentTerm, me, leaderID)
+				Debug(DAppend, "[%d] R%d REFUSE <- R%d, OLD LOG", currentTerm, me, leaderID)
 				reply.Success = true
 				return
 			}
@@ -194,9 +194,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		)
 
 		if !args.HasSnapshot {
-			newCommitIndex = min(leaderCommit, args.PrevLogIndex+len(args.Log))
+			newCommitIndex = Min(leaderCommit, args.PrevLogIndex+len(args.Log))
 		} else {
-			newCommitIndex = min(leaderCommit, args.LastIncludeIndex+len(args.Log)-1)
+			newCommitIndex = Min(leaderCommit, args.LastIncludeIndex+len(args.Log)-1)
 		}
 
 		var commitIndex int
@@ -210,7 +210,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// 一边去提交就好了
 			go func() {
 				// 通知commit协程提交日志
-				Debug(dCommit, "[%d] R%d UPDATE  CI:%d <-R%d", currentTerm, me, newCommitIndex, leaderID)
+				Debug(DCommit, "[%d] R%d UPDATE  CI:%d <-R%d", currentTerm, me, newCommitIndex, leaderID)
+
 				rf.commitCh <- newCommitIndex
 			}()
 		}
@@ -230,7 +231,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 日志添加完成
 	if j >= len(args.Log) {
-		Debug(dAppend, "[%d] R%d APPEND <- R%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
+		Debug(DAppend, "[%d] R%d APPEND <- R%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
 		return
 	}
 
@@ -239,13 +240,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		log := make([]Entry, len(rf.Log[:i]))
 		copy(log, rf.Log[:i])
 		rf.Log = log
-		Debug(dAppend, "[%d] R%d DROP <- R%d, CLI:%d-%d, HAS:%v", currentTerm, me, leaderID, i, j, args.HasSnapshot)
+		Debug(DAppend, "[%d] R%d DROP <- R%d, CLI:%d-%d, HAS:%v", currentTerm, me, leaderID, i, j, args.HasSnapshot)
 	}
 
 	// 追加剩余日志
 	rf.Log = append(rf.Log, args.Log[j:]...)
 
-	Debug(dAppend, "[%d] R%d APPEND <- R%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
+	Debug(DAppend, "[%d] R%d APPEND <- R%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
 }
 
 // Aerpc 向标号为peerIndex的peer发送AE RPC，并处理后续响应
@@ -254,7 +255,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // matchIndex	发送RPC时peer的matchIndex值
 // args			RPC参数
 func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEntriesArgs) {
-	Debug(dAppend, "[%d] R%d AE RPC -> R%d", image.CurrentTerm, image.me, peerIndex)
+	Debug(DAppend, "[%d] R%d AE RPC -> R%d", image.CurrentTerm, image.me, peerIndex)
 
 	reply := new(AppendEntriesReply)
 	image.peers[peerIndex].Call("Raft.AppendEntries", args, reply)
@@ -263,7 +264,7 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 	if image.Done() || !reply.Valid {
 		return
 	}
-	Debug(dAppend, "[%d] R%d AE <-REPLY R%d, V:%v S:%v CLI:%d, CLT:%d", image.CurrentTerm, image.me, peerIndex, reply.Valid, reply.Success, reply.ConflictIndex, reply.ConflictTerm)
+	Debug(DAppend, "[%d] R%d AE <-REPLY R%d, V:%v S:%v CLI:%d, CLT:%d", image.CurrentTerm, image.me, peerIndex, reply.Valid, reply.Success, reply.ConflictIndex, reply.ConflictTerm)
 
 	// server应该转为FOLLOWER，但不用重置计时器
 	if reply.Term > image.CurrentTerm {
@@ -273,7 +274,7 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 			i.State = FOLLOWER
 			i.CurrentTerm = reply.Term
 			i.VotedFor = -1
-			Debug(dTimer, "[%d] R%d CONVERT FOLLOWER <- R%d NEW TERM.", i.CurrentTerm, i.me, peerIndex)
+			Debug(DTimer, "[%d] R%d CONVERT FOLLOWER <- R%d NEW TERM.", i.CurrentTerm, i.me, peerIndex)
 
 			// 使旧的Image实例失效
 			close(i.done)
@@ -305,7 +306,7 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 
 		snapshotIndex := image.RWLog.SnapshotIndex
 		// nextIndex不能小于snapshotIndex，因为snapshot之前的日志已经被删除了
-		newNextIndex = max(reply.ConflictIndex, snapshotIndex)
+		newNextIndex = Max(reply.ConflictIndex, snapshotIndex)
 		// 如果reply.ConflictTerm != -1从日志中搜索和FOLLOWER可以匹配的日志条目
 		if reply.ConflictTerm != -1 {
 			// 如果image.Log[newNextIndex - snapshotIndex].Term != reply.ConflictTerm，
@@ -330,7 +331,7 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 	// 采用CAS的方式，保证并发情况下nextIndex、matchIndex的正确性
 	if atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.nextIndex[peerIndex])), int64(nextIndex), int64(newNextIndex)) &&
 		atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.matchIndex[peerIndex])), int64(matchIndex), int64(newMatchIndex)) {
-		Debug(dAppend, "[%d] R%d UPDATE M&N -> R%d, MI:%d, NI:%d", image.CurrentTerm, image.me, peerIndex, newMatchIndex, newNextIndex)
+		Debug(DAppend, "[%d] R%d UPDATE M&N -> R%d, MI:%d, NI:%d", image.CurrentTerm, image.me, peerIndex, newMatchIndex, newNextIndex)
 
 		// 通知LEADER提交日志
 		if newMatchIndex > matchIndex {
@@ -375,7 +376,7 @@ loop:
 
 		// 通知applier协程提交日志，放在协程内执行可以让calculateCommitIndex尽快返回
 		go func() {
-			Debug(dCommit, "[%d] R%d UPDATE CI:%d", rf.CurrentTerm, rf.me, matchIndex)
+			Debug(DCommit, "[%d] R%d UPDATE CI:%d", rf.CurrentTerm, rf.me, matchIndex)
 			rf.commitCh <- matchIndex
 		}()
 	}
@@ -384,7 +385,7 @@ loop:
 func (rf *Raft) SendAppendEntries() {
 	image := *rf.Image
 
-	Debug(dAppend, "[%d] R%d SEND AE RPC.", rf.CurrentTerm, rf.me)
+	Debug(DAppend, "[%d] R%d SEND AE RPC.", rf.CurrentTerm, rf.me)
 	rf.RWLog.mu.RLock()
 	defer rf.RWLog.mu.RUnlock()
 	for server := range rf.peers {

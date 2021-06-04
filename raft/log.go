@@ -59,6 +59,7 @@ func (rf *Raft) applier() {
 
 	for commitIndex := range rf.commitCh {
 		if rf.killed() {
+			close(rf.applyCh)
 			return
 		}
 
@@ -75,10 +76,16 @@ func (rf *Raft) applier() {
 				continue
 			}
 			entry := rf.Log[rf.lastApplied-snapshotIndex]
-			rf.RWLog.mu.RUnlock()
-			Debug(dCommit, "[%d] R%d APPLY LA:%d, SI:%d", rf.CurrentTerm, rf.me, rf.lastApplied, snapshotIndex)
-			rf.applyCh <- entry.ApplyMsg
 			rf.lastApplied++
+			rf.RWLog.mu.RUnlock()
+
+			// 过滤掉占位符日志条目
+			if !entry.CommandValid && !entry.SnapshotValid {
+				continue
+			}
+
+			Debug(DCommit, "[%d] R%d APPLY LA:%d, SI:%d", rf.CurrentTerm, rf.me, rf.lastApplied-1, snapshotIndex)
+			rf.applyCh <- entry.ApplyMsg
 		}
 	}
 }
