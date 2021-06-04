@@ -6,11 +6,11 @@ package shardctrler
 // RPC interface:
 // Join(servers) -- add a set of groups (gid -> server-list mapping).
 // Leave(gids) -- delete a set of groups.
-// Move(shard, gid) -- hand off one shard from current owner to gid.
+// Move(shards, gid) -- hand off one shards from current owner to gid.
 // Query(num) -> fetch Config # num, or latest config if num==-1.
 //
 // A Config (configuration) describes a set of replica groups, and the
-// replica group responsible for each shard. Configs are numbered. Config
+// replica group responsible for each shards. Configs are numbered. Config
 // #0 is the initial configuration, with no groups and all shards
 // assigned to group 0 (the invalid group).
 //
@@ -24,7 +24,7 @@ const NShards = 10
 // Please don't change this.
 type Config struct {
 	Num    int              // config number
-	Shards [NShards]int     // shard -> gid
+	Shards [NShards]int     // shards -> gid
 	Groups map[int][]string // gid -> servers[]
 }
 
@@ -36,6 +36,8 @@ type Err string
 
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
+	ClerkID int
+	OpSeq   int
 }
 
 type JoinReply struct {
@@ -45,6 +47,9 @@ type JoinReply struct {
 
 type LeaveArgs struct {
 	GIDs []int
+
+	ClerkID int
+	OpSeq   int
 }
 
 type LeaveReply struct {
@@ -55,6 +60,9 @@ type LeaveReply struct {
 type MoveArgs struct {
 	Shard int
 	GID   int
+
+	ClerkID int
+	OpSeq   int
 }
 
 type MoveReply struct {
@@ -64,6 +72,9 @@ type MoveReply struct {
 
 type QueryArgs struct {
 	Num int // desired config number
+
+	ClerkID int
+	OpSeq   int
 }
 
 type QueryReply struct {
