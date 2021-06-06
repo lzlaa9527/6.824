@@ -1,5 +1,6 @@
 package raft
 
+import "log"
 
 type RequestVoteArgs struct {
 	Term         int
@@ -177,7 +178,6 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 						// 初始化server的状态
 						rf.nextIndex = make([]int, len(rf.peers))
 						rf.matchIndex = make([]int, len(rf.peers))
-						// rf.nmmutex = make([]*sync.RWMutex, len(rf.peers))
 
 						rf.RWLog.mu.RLock()
 						for j := range rf.peers {
@@ -192,6 +192,9 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 						rf.done = make(chan signal)
 						Debug(DVote, "[%d] R%d CONVERT LEADER.", rf.CurrentTerm, rf.me)
 
+						if rf.gid != 0 {
+							log.Printf("[%d] R%d#%d CONVERT LEADER.\n", rf.CurrentTerm, rf.me, rf.gid)
+						}
 						// 重置计时器，设置心跳时间
 						rf.resetTimer()
 					})

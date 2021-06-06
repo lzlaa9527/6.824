@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"log"
 	"sync/atomic"
 	"unsafe"
 )
@@ -76,6 +77,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		currentTerm = image.CurrentTerm
 		Debug(DAppend, "[%d] R%d CONVERT FOLLOWER <- R%d.", term, me, leaderID)
 		i.resetTimer() // 重置计时器
+		if rf.gid != 0 {
+			log.Printf("[%d] R%d#%d RECEIVE AERPC, CONVERT FOLLOWER. <- R%d.", term, me, rf.gid, leaderID)
+		}
 	})
 
 	// server的状态已经发生了改变
@@ -257,6 +261,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEntriesArgs) {
 	Debug(DAppend, "[%d] R%d AE RPC -> R%d", image.CurrentTerm, image.me, peerIndex)
 
+	if image.gid != 0 {
+		log.Printf("[%d] R%d#%d AE RPC -> R%d\n", image.CurrentTerm, image.me, image.gid, peerIndex)
+	}
+
 	reply := new(AppendEntriesReply)
 	image.peers[peerIndex].Call("Raft.AppendEntries", args, reply)
 
@@ -385,7 +393,6 @@ loop:
 func (rf *Raft) SendAppendEntries() {
 	image := *rf.Image
 
-	Debug(DAppend, "[%d] R%d SEND AE RPC.", rf.CurrentTerm, rf.me)
 	rf.RWLog.mu.RLock()
 	defer rf.RWLog.mu.RUnlock()
 	for server := range rf.peers {

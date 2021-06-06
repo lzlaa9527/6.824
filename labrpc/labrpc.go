@@ -478,7 +478,7 @@ func MakeService(rcvr interface{}) *Service {
 func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 	if method, ok := svc.methods[methname]; ok {
 		// prepare space into which to read the argument.
-		// the Value's type will be a pointer to req.argsType.
+		// the DB's type will be a pointer to req.argsType.
 		args := reflect.New(req.argsType)
 
 		// decode the argument.

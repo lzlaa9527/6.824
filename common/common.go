@@ -1,11 +1,18 @@
 package common
 
-import "sync"
+import (
+	"reflect"
+	"sync"
+	"time"
+)
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongLeader = "ErrWrongLeader"
+	OK              = "OK"
+	ErrNoKey        = "ErrNoKey"
+	ErrWrongLeader  = "ErrWrongLeader"
+	ErrLowerConfig  = "ErrLowerConfig"
+	ErrHigherConfig = "ErrHigherConfig"
+	ErrMigrating    = "ErrMigrating"
 )
 
 type Err string
@@ -65,9 +72,10 @@ func (or OpReplys) Wait(i Index) *SignalWithOpReply {
 }
 
 // clerk协程等待reqOp的完成。
+// 如果Err不为nil表明发生了leadership的转变。
 // 因为存在raft leadership的转变，多个clerk可能会等待同一个index的op；当server执行完
 // index对应的op后，会通知所有等待的clerk协程；clerk协程会根据result.op == reqOp判断
-// 完成的op是不是自己提交的op；如果不是就表明发生了leadership的转变
+// 完成的op是不是自己提交的op；如果不是就表明发生了leadership的转变。
 //
 func (or OpReplys) WaitAndMatch(index int, reqOp Op) (interface{}, Err) {
 
@@ -75,7 +83,7 @@ func (or OpReplys) WaitAndMatch(index int, reqOp Op) (interface{}, Err) {
 	resOp := result.op // raft所提交日志中的ApplyMsg
 
 	// leadership 发生变更，或者原先提交的请求被覆盖时index处的 resOp != reqOp
-	if resOp != reqOp {
+	if !reflect.DeepEqual(resOp, reqOp) {
 		return nil, ErrWrongLeader
 	}
 	or.Delete(Index(index)) // 为了节约内存及时删除缓存
@@ -86,15 +94,15 @@ func (or OpReplys) WaitAndMatch(index int, reqOp Op) (interface{}, Err) {
 // 如果目前还没有clerk等待该Op，且wake为false则直接返回；
 // 如果wake为true，说明存在clerk会等待该op的完成，因此需要创建并插入对应的OpResult，
 // 并且closer(ret.s)告知等待的clerk，该op已经完成
-func (or OpReplys) SetAndBroadcast(i Index, op Op, re interface{}, wake bool) {
+func (or OpReplys) SetAndBroadcast(i Index, op Op, re interface{}, awake bool) {
+	if !awake {
+		return
+	}
 	or.mu.Lock()
 	defer or.mu.Unlock()
 
 	ret, ok := or.table[i]
 	if !ok { // 没有等待该Op的工作协程，直接返回
-		if !wake {
-			return
-		}
 		or.table[i] = new(SignalWithOpReply)
 		or.table[i].s = make(chan signal)
 		ret = or.table[i]
@@ -131,40 +139,60 @@ type Identifier struct {
 // 值是该Client目前待提交的Seq
 // 如果遇到OpSeq较小的Op就可以判定该Op是被重复提交的，因此不会被执行。
 type ITable struct {
+	mu         *sync.RWMutex
 	SeqTable   map[int]int         // 记录每一个clerk的待提交的Op Sequence number
 	ReplyTable map[int]interface{} // 记录每一个clerk的上一个Op的执行结果，以便等待同一个op的clerk协程能够立即返回
 }
 
 func NewITable() ITable {
 	return ITable{
+		mu:         new(sync.RWMutex),
 		SeqTable:   make(map[int]int),
 		ReplyTable: make(map[int]interface{}),
 	}
 }
 
-// 返回clerkID对应clerk的可用的Op标识符
-func (itable ITable) GetIdentifier(clerkID int) Identifier {
-
-	return Identifier{
-		ClerkID: clerkID,
-		Seq:     itable.SeqTable[clerkID],
-	}
-}
-
-// 返回clerkID对应clerk的上一个Op的执行结果
-func (itable *ITable) GetCacheReply(clerkID int) (reply interface{}) {
-	return itable.ReplyTable[clerkID]
-}
-
 // 更新clerkID对应clerk的下一个Op标识符
-func (itable *ITable) UpdateIdentifier(clerkID int, seq int, reply interface{}) {
+func (itable ITable) UpdateIdentifier(clerkID int, seq int, reply interface{}) {
+	itable.mu.Lock()
+	defer itable.mu.Unlock()
+
 	itable.SeqTable[clerkID] = seq
 	itable.ReplyTable[clerkID] = reply
 }
 
-// 如果i标识的Op已经被执行过了，Executed返回true
-func (itable *ITable) Executed(i Identifier) bool {
-	return i.Seq < itable.SeqTable[i.ClerkID]
+// 如果i标识的Op已经被执行过了，Executed返回true，以及缓存的结果。
+func (itable ITable) Executed(i Identifier) (executed bool, reply interface{}) {
+	itable.mu.RLock()
+	defer itable.mu.RUnlock()
+
+	return i.Seq < itable.SeqTable[i.ClerkID], itable.ReplyTable[i.ClerkID]
+}
+
+func (itable ITable) Export(all bool) (seqTable map[int]int, replyTable map[int]interface{}) {
+	itable.mu.RLock()
+	defer itable.mu.RUnlock()
+
+	seqTable, replyTable = make(map[int]int), make(map[int]interface{})
+
+	for id := range itable.SeqTable {
+		if id>>62 == 1 && !all {
+			continue
+		}
+		seqTable[id] = itable.SeqTable[id]
+		replyTable[id] = itable.ReplyTable[id]
+	}
+	return
+}
+
+func (itable ITable) Reset() {
+	itable.mu.Lock()
+	defer itable.mu.Unlock()
+
+	for id := range itable.SeqTable {
+		delete(itable.SeqTable, id)
+		delete(itable.ReplyTable, id)
+	}
 }
 
 type Op struct {
@@ -173,7 +201,16 @@ type Op struct {
 	// otherwise RPC will break.
 	ServerID int // 打包该Op的Server
 	Kind     string
-	Key      string
-	Value    string
+	Key      interface{}
+	Value    interface{}
 	ID       Identifier
+	Cfgnum   int // Clerk的Config Num
+}
+
+func ResetTimer(t *time.Timer, d time.Duration) {
+	select {
+	case <-t.C:
+	default:
+	}
+	t.Reset(d)
 }
