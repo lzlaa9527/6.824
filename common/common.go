@@ -1,6 +1,9 @@
 package common
 
-import "sync"
+import (
+	"reflect"
+	"sync"
+)
 
 const (
 	OK             = "OK"
@@ -75,7 +78,7 @@ func (or OpReplys) WaitAndMatch(index int, reqOp Op) (interface{}, Err) {
 	resOp := result.op // raft所提交日志中的ApplyMsg
 
 	// leadership 发生变更，或者原先提交的请求被覆盖时index处的 resOp != reqOp
-	if resOp != reqOp {
+	if !reflect.DeepEqual(resOp, reqOp) {
 		return nil, ErrWrongLeader
 	}
 	or.Delete(Index(index)) // 为了节约内存及时删除缓存
@@ -173,7 +176,7 @@ type Op struct {
 	// otherwise RPC will break.
 	ServerID int // 打包该Op的Server
 	Kind     string
-	Key      string
-	Value    string
+	Key      interface{}
+	Value    interface{}
 	ID       Identifier
 }

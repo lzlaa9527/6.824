@@ -1,5 +1,7 @@
 package shardctrler
 
+import . "6.824/common"
+
 //
 // Shard controler: assigns shards to replication groups.
 //
@@ -28,20 +30,14 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
-const (
-	OK = "OK"
-)
-
-type Err string
-
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
+
 	ClerkID int
 	OpSeq   int
 }
 
 type JoinReply struct {
-	WrongLeader bool
 	Err         Err
 }
 
@@ -53,7 +49,6 @@ type LeaveArgs struct {
 }
 
 type LeaveReply struct {
-	WrongLeader bool
 	Err         Err
 }
 
@@ -66,7 +61,6 @@ type MoveArgs struct {
 }
 
 type MoveReply struct {
-	WrongLeader bool
 	Err         Err
 }
 
@@ -78,7 +72,6 @@ type QueryArgs struct {
 }
 
 type QueryReply struct {
-	WrongLeader bool
 	Err         Err
 	Config      Config
 }

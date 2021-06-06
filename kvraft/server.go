@@ -43,14 +43,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-
-		Debug(DServer, "[*] S%d NOT LEADER.", kv.me)
 		return
 	}
 	Debug(DServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
 
 	ret, err := kv.WaitAndMatch(index, op)
-	// Debug(DServer, "[*] S%d GET REPLY, SEQ: %d.", kv.me, index)
 	if ret == nil {
 		reply.Err = err
 	} else {
@@ -76,10 +73,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		Debug(DServer, "[*] S%d NOT LEADER.", kv.me)
 		return
 	}
-	// Debug(DServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
 
 	ret, err := kv.WaitAndMatch(index, op)
 	if ret == nil {
@@ -93,6 +88,7 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	kv.OpReplys.Destory() // 通知尚未退出的clerk退出
+	Debug(DServer, "S%d Stop!", kv.me)
 }
 
 func (kv *KVServer) killed() bool {
@@ -160,11 +156,11 @@ func (kv *KVServer) applier() {
 			// 执行对应的命令
 			switch op.Kind {
 			case "Get":
-				reply = kv.Database.Get(op.Key)
+				reply = kv.Database.Get(op.Key.(string))
 			case "Put":
-				reply = kv.Database.Put(op.Key, op.Value)
+				reply = kv.Database.Put(op.Key.(string), op.Value.(string))
 			case "Append":
-				reply = kv.Database.Append(op.Key, op.Value)
+				reply = kv.Database.Append(op.Key.(string), op.Value.(string))
 			}
 
 			// 更新clerkID对应的Client的下一个待执行Op的Seq

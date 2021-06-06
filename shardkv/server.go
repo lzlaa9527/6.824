@@ -67,7 +67,7 @@ func (kv *ShardKV) Kill() {
 // RPCs to the shardctrler.
 //
 // make_end(servername) turns a server name from a
-// Config.Groups[gid][i] into a labrpc.ClientEnd on which you can
+// Config.groups[gid][i] into a labrpc.ClientEnd on which you can
 // send RPCs. You'll need this to send RPCs to other groups.
 //
 // look at client.go for examples of how to use ctrlers[]
