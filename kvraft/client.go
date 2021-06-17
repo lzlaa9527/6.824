@@ -4,7 +4,6 @@ import (
 	. "6.824/common"
 	"6.824/labrpc"
 	"6.824/raft"
-	"fmt"
 	"reflect"
 	"time"
 )
@@ -95,15 +94,14 @@ func (ck *Clerk) doRPC(method string, arg interface{}, reply interface{}) interf
 			co++
 			Debug(DClient, "[*] C%d CALL %s TIMEOUT, SEQ: %d", ck.ClerkID, method, ck.OpSeq-1)
 		} else {
-			Debug(DClient, "[*] C%d RECEIVE %s REPLY, SEQ: %d; %+v", ck.ClerkID, method, ck.OpSeq-1, reply)
-
-			fmt.Printf("err:%v\n", reflect.ValueOf(reply).Elem().FieldByName("Err").Interface().(Err))
+			// Debug(DClient, "[*] C%d RECEIVE %s REPLY, SEQ: %d; %+v", ck.ClerkID, method, ck.OpSeq-1, reply)
 
 			switch reflect.ValueOf(reply).Elem().FieldByName("Err").Interface().(Err) {
-			case OK:
+			case OK, ErrNoKey:
+				Debug(DClient, "[*] S%d %s DONE.", ck.leaderID, method)
 				return reply
 			case ErrWrongLeader:
-				Debug(DClient, "[*] S%d WRONG LEADER.", ck.leaderID)
+				// Debug(DClient, "[*] S%d WRONG LEADER.", ck.leaderID)
 				ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
 				co++
 			}

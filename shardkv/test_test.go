@@ -223,6 +223,7 @@ func TestMissChange(t *testing.T) {
 
 	ck := cfg.makeClient()
 
+	t.Logf("=== Join:%d ===\n", 0)
 	cfg.join(0)
 
 	n := 10
@@ -236,15 +237,25 @@ func TestMissChange(t *testing.T) {
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
-
+	t.Logf("=== Join:%d ===\n", 1)
 	cfg.join(1)
 
+	t.Logf("=== ShutDown:%d#%d ===\n", 0, 0)
 	cfg.ShutdownServer(0, 0)
+
+	t.Logf("=== ShutDown:%d#%d ===\n", 0, 1)
 	cfg.ShutdownServer(1, 0)
+
+	t.Logf("=== ShutDown:%d#%d ===\n", 0, 2)
 	cfg.ShutdownServer(2, 0)
 
+	t.Logf("=== Join:%d ===\n", 2)
 	cfg.join(2)
+
+	t.Logf("=== Leave:%d ===", 1)
 	cfg.leave(1)
+
+	t.Logf("=== Leave:%d ===", 0)
 	cfg.leave(0)
 
 	for i := 0; i < n; i++ {
