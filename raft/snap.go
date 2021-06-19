@@ -26,7 +26,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	offset := index - rf.RWLog.SnapshotIndex
 
 	// 丢弃过时的快照
-	if offset < 0 {
+	if offset < 0 || offset >= len(rf.Log) {
 		Debug(DSnap, "[%d] R%d REFUSE SNAPSHOT - OLD INDEX, LII:%d, SI:%d", rf.CurrentTerm, rf.me, index, rf.RWLog.SnapshotIndex)
 		return
 	}

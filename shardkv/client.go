@@ -4,14 +4,13 @@ package shardkv
 // client code to talk to a sharded key/DB service.
 //
 // the client first talks to the shardctrler to find out
-// the assignment of shards (keys) to groups, and then
+// the assignment of Shards (keys) to groups, and then
 // talks to the group that holds the key's shard.
 //
 
 import (
 	. "6.824/common"
 	"6.824/labrpc"
-	"6.824/raft"
 	"reflect"
 )
 import "6.824/shardctrler"
@@ -107,9 +106,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
+	time.Sleep(time.Millisecond * 2)
 	ck.PutAppend(key, value, "Put")
 }
+
 func (ck *Clerk) Append(key string, value string) {
+	time.Sleep(time.Millisecond * 2)
 	ck.PutAppend(key, value, "Append")
 }
 
@@ -117,8 +119,9 @@ func (ck *Clerk) Append(key string, value string) {
 // 否则就是调用ShardKV.Put/Append/Get
 func (ck *Clerk) doRPC(method string, key string, arg interface{}, reply interface{}) interface{} {
 
-	co := 0
 	replyType := reflect.TypeOf(reply).Elem()
+	t := time.NewTimer(time.Second)
+
 	for {
 
 		shard := key2shard(key)
@@ -132,55 +135,54 @@ func (ck *Clerk) doRPC(method string, key string, arg interface{}, reply interfa
 			continue
 		}
 
-		co++
 		Debug(DClient, "[*] C%d CALL `%s` TO S%d#%d, SEQ:%d, CFG:%d", ck.ClerkID, method, ck.leaderID, gid, ck.OpSeq-1, ck.config.Num)
 		reply = reflect.New(replyType).Interface()
 		retCh := make(chan bool, 1) // 这里必须是带缓冲的，为了能够让工作协程顺利退出
+
 		go func() {
 			srv := ck.make_end(servers[ck.leaderID])
 			retCh <- srv.Call(method, arg, reply)
 		}()
 
 		var ok bool
+		ResetTimer(t, time.Second)
 		select {
 		case ok = <-retCh:
-		case <-time.After(raft.HEARTBEAT * 10):
-			ok = false
+			t.Stop()
+		case <-t.C:
 		}
 
 		// Call返回false或者定时器到期，表明请求超时
-		if !ok {
-			Debug(DClient, "[*] C%d CALL `%s` TIMEOUT, SEQ: %d", ck.ClerkID, method, ck.OpSeq-1)
-
-			ck.config = ck.sm.Query(-1)
-			reflect.ValueOf(arg).Elem().FieldByName("Cfgnum").SetInt(int64(ck.config.Num))
-			Debug(DClient, "[*] C%d FETCH CONFIG: %d#%+v", ck.ClerkID, ck.config.Num, ck.config.Shards)
-
-			co = 0
-			ck.leaderID = (ck.leaderID + 1) % len(servers)
-		} else {
+		if ok {
 			Debug(DClient, "[*] C%d RECEIVE `%s` REPLY, SEQ: %d; %+v", ck.ClerkID, method, ck.OpSeq-1, reply)
-
 			switch reflect.ValueOf(reply).Elem().FieldByName("Err").Interface().(Err) {
 			case OK, ErrNoKey:
 				return reply
 
-			case ErrWrongLeader:
-				Debug(DClient, "[*] S%d WRONG LEADER.", ck.leaderID)
-				ck.leaderID = (ck.leaderID + 1) % len(servers)
-
-			case ErrWrongConfig: // clerk 需要更新config
-				time.Sleep(raft.HEARTBEAT)
+			case ErrLowerConfig: // clerk 需要更新config
 				ck.config = ck.sm.Query(-1)
 				reflect.ValueOf(arg).Elem().FieldByName("Cfgnum").SetInt(int64(ck.config.Num))
 				Debug(DClient, "[*] C%d FETCH CONFIG: %d#%+v", ck.ClerkID, ck.config.Num, ck.config.Shards)
-				continue
+
+			case ErrHigherConfig:
+				time.Sleep(time.Millisecond * 100)
+				ck.leaderID = (ck.leaderID + 1) % len(servers)
+
+			case ErrWrongLeader:
+				ck.leaderID = (ck.leaderID + 1) % len(servers)
+			case ErrMigrating:
+				time.Sleep(time.Millisecond * 100)
 			}
+		} else {
+			Debug(DClient, "[*] C%d  CALL `%s` TO S%d#%d TIMEOUT SEQ:%d, CFG:%d", ck.ClerkID, method, ck.leaderID, gid, ck.OpSeq-1, ck.config.Num)
+			ck.config = ck.sm.Query(-1)
+			reflect.ValueOf(arg).Elem().FieldByName("Cfgnum").SetInt(int64(ck.config.Num))
+			Debug(DClient, "[*] C%d FETCH CONFIG: %d#%+v", ck.ClerkID, ck.config.Num, ck.config.Shards)
+			ck.leaderID = (ck.leaderID + 1) % len(servers)
 		}
 
-		// 如果所有的server都不是leader，那就等待300ms
-		if co%len(servers) == 0 {
-			time.Sleep(raft.HEARTBEAT * 3)
+		if ck.leaderID == 0 {
+			time.Sleep(time.Millisecond * 100)
 		}
 	}
 }

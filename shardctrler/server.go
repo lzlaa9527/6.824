@@ -37,6 +37,10 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	}
 	Debug(DServer, "[*] S%d RECEIVE OP:%+v", sc.me, op)
 
+	if ok, ret := sc.ITable.Executed(op.ID); ok {
+		reply.Err = ret.(JoinReply).Err
+	}
+
 	index, _, isLeader := sc.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -66,6 +70,10 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	}
 	Debug(DServer, "[*] S%d RECEIVE OP:%+v", sc.me, op)
 
+	if ok, ret := sc.ITable.Executed(op.ID); ok {
+		reply.Err = ret.(LeaveReply).Err
+	}
+
 	index, _, isLeader := sc.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -82,6 +90,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
+
 	// Your code here.
 	op := Op{
 		ServerID: sc.me,
@@ -94,6 +103,10 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 		},
 	}
 	Debug(DServer, "[*] S%d RECEIVE OP:%+v", sc.me, op)
+
+	if ok, ret := sc.ITable.Executed(op.ID); ok {
+		reply.Err = ret.(MoveReply).Err
+	}
 
 	index, _, isLeader := sc.rf.Start(op)
 	if !isLeader {
@@ -112,6 +125,14 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
+
+	num := args.Num
+	if num > 0 && num < len(sc.configs) { // 直接返回
+		reply.Config = sc.configs[num]
+		reply.Err = OK
+		return
+	}
+
 	op := Op{
 		ServerID: sc.me,
 		Kind:     "Query",
@@ -123,6 +144,11 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		},
 	}
 	Debug(DServer, "[*] S%d RECEIVE OP:%+v", sc.me, op)
+
+	if ok, ret := sc.ITable.Executed(op.ID); ok {
+		reply.Err = ret.(QueryReply).Err
+		reply.Config = ret.(QueryReply).Config
+	}
 
 	index, _, isLeader := sc.rf.Start(op)
 	if !isLeader {
@@ -217,8 +243,7 @@ func (sc *ShardCtrler) applier() {
 		index := applyMsg.CommandIndex
 
 		// 避免重复执行同一个op
-		if sc.ITable.Executed(identifier) {
-			reply := sc.ITable.GetCacheReply(op.ID.ClerkID)
+		if ok, reply := sc.ITable.Executed(op.ID); ok {
 			sc.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == sc.me && !applyMsg.Replay)
 			continue
 		}

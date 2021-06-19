@@ -48,6 +48,7 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 	// nmmutex    []*sync.RWMutex // 保证nextIndex、matchIndex的并发读写的正确性
+	gid int
 }
 
 func (rf *Raft) GetState() (int, bool) {
@@ -182,11 +183,11 @@ func (rf *Raft) killed() bool {
 	}
 }
 
-const HEARTBEAT = 100 * time.Millisecond
+const HEARTBEAT = 80 * time.Millisecond
 
 // 选举超时时间至少是心跳时间的3倍
 func electionTime() time.Duration {
-	d := rand.Intn(300) + 300
+	d := rand.Intn(250) + 350
 	return time.Duration(d) * time.Millisecond
 }
 
@@ -202,7 +203,7 @@ func (rf *Raft) resetTimer() {
 	case FOLLOWER:
 		ELT := electionTime()
 		rf.timer.Reset(ELT)
-		Debug(DTimer, "[%d] R%d CONVERT FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
+		Debug(DTimer, "[%d] R%d# CONVERT FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
 	case CANDIDATE:
 		ELT := electionTime()
 		rf.timer.Reset(ELT)
@@ -255,6 +256,9 @@ func (rf *Raft) ticker() {
 		switch rf.State {
 		case FOLLOWER:
 		case CANDIDATE:
+			if rf.gid != 0 {
+				log.Printf("[%d] R%d#%d CONVERT CANDIDATE.\n", rf.CurrentTerm, rf.me, rf.gid)
+			}
 			rf.sendRequestVote()
 		case LEADER:
 			rf.SendAppendEntries()
@@ -290,6 +294,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	Debug(DTest, "[%d] R%d START.", rf.CurrentTerm, rf.me)
-
 	return rf
+}
+
+func (rf *Raft) SetGID(gid int) {
+	rf.gid = gid
 }

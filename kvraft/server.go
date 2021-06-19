@@ -146,8 +146,7 @@ func (kv *KVServer) applier() {
 			index := applyMsg.CommandIndex
 
 			// 避免重复执行同一个op
-			if kv.ITable.Executed(identifier) {
-				reply := kv.ITable.GetCacheReply(op.ID.ClerkID)
+			if ok,reply:=kv.ITable.Executed(identifier);ok {
 				kv.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.Replay)
 				continue
 			}

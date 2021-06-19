@@ -48,6 +48,13 @@ func init() {
 	debugStart = time.Now()
 	// debug = getVerbosity()
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
+
+	path := "./output/raft_" + strconv.Itoa(time.Now().Second()) + ".log"
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	if err != nil {
+		log.Fatalf("fail to open `%s`, err:%s\n", path, err)
+	}
+	log.SetOutput(f)
 }
 
 func Debug(topic logTopic, format string, a ...interface{}) {
@@ -57,7 +64,6 @@ func Debug(topic logTopic, format string, a ...interface{}) {
 		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
 		format = prefix + format
 		log.Printf(format, a...)
-
 	}
 }
 

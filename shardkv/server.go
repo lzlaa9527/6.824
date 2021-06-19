@@ -15,7 +15,7 @@ import (
 )
 
 type ShardKV struct {
-	mu           sync.Mutex
+	mu           sync.RWMutex
 	me           int
 	rf           *raft.Raft
 	applyCh      chan raft.ApplyMsg
@@ -32,17 +32,11 @@ type ShardKV struct {
 	OpReplys // 存储server已经处理的Op及其结果
 	ITable   // 记录每个客户端待处理的Op二元组标识符：(ClerkID, OpSeq)；需要持久化保存
 	Database // 数据库；需要持久化保存
+
+	pullTasks Tasks
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-
-	curCfgnum := atomic.LoadInt64((*int64)(unsafe.Pointer(&kv.config.Num)))
-	Debug(DServer, "[*] S%d#%d&%d RECEIVE `Get` OP:%+v", kv.me, kv.gid, curCfgnum, args)
-
-	if args.Cfgnum < int(curCfgnum) || args.Cfgnum == 0 {
-		reply.Err = ErrWrongConfig
-		return
-	}
 
 	op := Op{
 		ServerID: kv.me,
@@ -55,10 +49,30 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		},
 	}
 
-	if kv.ITable.Executed(op.ID) {
-		ret := kv.ITable.GetCacheReply(op.ID.ClerkID)
+	if ok, ret := kv.ITable.Executed(op.ID); ok {
 		reply.Err = ret.(GetReply).Err
 		reply.Value = ret.(GetReply).Value
+		return
+	}
+
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		reply.Err = ErrWrongLeader
+	}
+
+	// 当前数据尚未迁移完成
+	if kv.pullTasks.Contains(key2shard(args.Key)) {
+		reply.Err = ErrMigrating
+		return
+	}
+
+	curCfgnum := atomic.LoadInt64((*int64)(unsafe.Pointer(&kv.config.Num)))
+	Debug(DServer, "[*] S%d#%d&%d RECEIVE `Get` OP:%+v", kv.me, kv.gid, curCfgnum, args)
+
+	if args.Cfgnum < int(curCfgnum) {
+		reply.Err = ErrLowerConfig
+		return
+	} else if args.Cfgnum > int(curCfgnum) {
+		reply.Err = ErrHigherConfig
 		return
 	}
 
@@ -67,7 +81,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	Debug(DServer, "[*] S%d#%d&%d SEND RAFT, WAIT: %d.", kv.me, kv.gid, curCfgnum, index)
 
 	ret, err := kv.WaitAndMatch(index, op)
 	if ret == nil {
@@ -79,16 +92,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-
-	kv.mu.Lock()
-	curCfgnum := kv.config.Num
-	kv.mu.Unlock()
-	Debug(DServer, "[*] S%d#%d&%d RECEIVE `PutAppend` OP:%+v", kv.me, kv.gid, curCfgnum, args)
-
-	if args.Cfgnum < curCfgnum || args.Cfgnum == 0 {
-		reply.Err = ErrWrongConfig
-		return
-	}
 
 	op := Op{
 		ServerID: kv.me,
@@ -102,9 +105,29 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		},
 	}
 
-	if kv.ITable.Executed(op.ID) {
-		ret := kv.ITable.GetCacheReply(op.ID.ClerkID)
+	if ok, ret := kv.ITable.Executed(op.ID); ok {
 		reply.Err = ret.(PutAppendReply).Err
+		return
+	}
+
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		reply.Err = ErrWrongLeader
+	}
+
+	// 当前数据尚未迁移完成
+	if kv.pullTasks.Contains(key2shard(args.Key)) {
+		reply.Err = ErrMigrating
+		return
+	}
+
+	curCfgnum := atomic.LoadInt64((*int64)(unsafe.Pointer(&kv.config.Num)))
+	Debug(DServer, "[*] S%d#%d&%d RECEIVE `PutAppend` OP:%+v", kv.me, kv.gid, curCfgnum, args)
+
+	if args.Cfgnum < int(curCfgnum) {
+		reply.Err = ErrLowerConfig
+		return
+	} else if args.Cfgnum > int(curCfgnum) {
+		reply.Err = ErrHigherConfig
 		return
 	}
 
@@ -128,17 +151,6 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // 必须先完成请求数据库操作请求，再进行数据迁移。
 func (kv *ShardKV) Pull(args *PullArgs, reply *PullReply) {
 
-	kv.mu.Lock()
-	curCfgnum := kv.config.Num
-	kv.mu.Unlock()
-
-	Debug(DServer, "[*] S%d#%d&%d RECEIVE `Pull` OP:%+v", kv.me, kv.gid, curCfgnum, args)
-
-	if args.Cfgnum > curCfgnum {
-		reply.Err = ErrWrongConfig
-		return
-	}
-
 	op := Op{
 		ServerID: kv.me,
 		Kind:     "Pull",
@@ -154,16 +166,27 @@ func (kv *ShardKV) Pull(args *PullArgs, reply *PullReply) {
 		},
 	}
 
-	if kv.ITable.Executed(op.ID) {
-		Debug(DServer, "[*] S%d#%d&%d RECEIVE `Pull` OP:%+v", kv.me, kv.gid, curCfgnum, args)
+	// 如果只检查Executed，存在数据冲突的情况。
+	// 在执行Exectued后执行InstallSnapshot，Executed检查通过，但是GetCacheReply返回nil
+	if ok, ret := kv.ITable.Executed(op.ID); ok {
+		Debug(DServer, "[*] S%d#%d&%d EXECUTED `Pull` OP:%+v", kv.me, kv.gid, kv.config.Num, args)
 
-		ret := kv.ITable.GetCacheReply(op.ID.ClerkID)
 		reply.Err = ret.(PullReply).Err
 		reply.DB = ret.(PullReply).DB
 
-		tmp := kv.ITable.Export(false)
-		reply.SeqTable = tmp.SeqTable
-		reply.ReplyTable = tmp.ReplyTable
+		reply.SeqTable, reply.ReplyTable = kv.ITable.Export(false)
+		return
+	}
+
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		reply.Err = ErrWrongLeader
+	}
+
+	curCfgnum := atomic.LoadInt64((*int64)(unsafe.Pointer(&kv.config.Num)))
+	Debug(DServer, "[*] S%d#%d&%d RECEIVE `Pull` OP:%+v", kv.me, kv.gid, curCfgnum, args)
+
+	if args.Cfgnum > int(curCfgnum) {
+		reply.Err = ErrHigherConfig
 		return
 	}
 
@@ -172,7 +195,6 @@ func (kv *ShardKV) Pull(args *PullArgs, reply *PullReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	Debug(DServer, "[*] S%d#%d&%d SEND RAFT, WAIT: %d.", kv.me, kv.gid, curCfgnum, index)
 
 	ret, err := kv.WaitAndMatch(index, op)
 	if ret == nil {
@@ -180,10 +202,7 @@ func (kv *ShardKV) Pull(args *PullArgs, reply *PullReply) {
 	} else {
 		reply.Err = ret.(PullReply).Err
 		reply.DB = ret.(PullReply).DB
-
-		tmp := kv.ITable.Export(false)
-		reply.SeqTable = tmp.SeqTable
-		reply.ReplyTable = tmp.ReplyTable
+		reply.SeqTable, reply.ReplyTable = kv.ITable.Export(false)
 	}
 }
 
@@ -215,6 +234,8 @@ func StartServer(
 	labgob.Register(GetReply{})
 	labgob.Register(PullReply{})
 	labgob.Register(PullArgs{})
+	labgob.Register(MergeReply{})
+	labgob.Register(MergeArgs{})
 	labgob.Register(ReConfigReply{})
 	labgob.Register(ReConfigArgs{})
 	labgob.Register(Database{})
@@ -234,15 +255,17 @@ func StartServer(
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.rf.SetGID(kv.gid)
 
 	kv.ITable = NewITable()
 	kv.OpReplys = NewOpReplays()
 	kv.Database = make(Database)
+	kv.pullTasks = NewTasks()
 
 	go kv.applier()
 	go kv.poll()
 
-	Debug(DServer, "[*] S%d#%d start.", me, kv.gid)
+	Debug(DServer, "[*] S%d#%d start. ", me, kv.gid)
 	return kv
 }
 
@@ -252,7 +275,9 @@ func StartServer(
 // 3. 如果raft的statesize达到maxstatesize，就通知raft拍摄快照
 func (kv *ShardKV) applier() {
 	for applyMsg := range kv.applyCh {
+
 		if kv.killed() {
+			Debug(DServer, "[*] S%d#%d&%d applier crash. IN:%d, TERM:%d", kv.me, kv.gid, kv.config.Num)
 			return
 		}
 
@@ -267,8 +292,7 @@ func (kv *ShardKV) applier() {
 			Debug(DServer, "[*] S%d#%d&%d RECEIVE LOG ENTRY. IN:%d, CMD:%+v", kv.me, kv.gid, kv.config.Num, applyMsg.CommandIndex, applyMsg.Command)
 
 			// 避免重复执行同一个op
-			if kv.ITable.Executed(identifier) {
-				reply := kv.ITable.GetCacheReply(op.ID.ClerkID)
+			if ok, reply := kv.ITable.Executed(op.ID); ok {
 				kv.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.Replay)
 				continue
 			}
@@ -280,15 +304,14 @@ func (kv *ShardKV) applier() {
 			switch op.Kind {
 			case "Pull":
 				if op.Cfgnum > kv.config.Num {
-					reply = PullReply{Err: ErrWrongConfig}
+					reply = PullReply{Err: ErrHigherConfig}
 					retry = true
 				} else {
-
 					pullArgs := op.Value.(PullArgs)
 					pullDB := make(Database)
 					for k, v := range kv.Database {
 						shardID := key2shard(k)
-						for _, sid := range pullArgs.ShardsID {
+						for _, sid := range pullArgs.Shards {
 							if sid == shardID {
 								pullDB[k] = v
 								delete(kv.Database, k)
@@ -312,18 +335,13 @@ func (kv *ShardKV) applier() {
 					}
 					reply = PullReply{DB: pullDB, Err: OK}
 				}
-
-			case "ReConfig":
-				if op.Cfgnum != kv.config.Num+1 {
-					reply = ReConfigReply{Err: ErrWrongConfig}
+			case "Merge":
+				if op.Cfgnum < kv.config.Num {
+					reply = MergeReply{Err: ErrLowerConfig}
 					retry = true
 				} else {
-					args := op.Value.(ReConfigArgs)
+					args := op.Value.(MergeArgs)
 					mergeDB := args.DB
-
-					kv.mu.Lock()
-					kv.config = args.Config // 更新config
-					kv.mu.Unlock()
 
 					// 合并数据，完成数据迁移
 					for k, v := range mergeDB {
@@ -336,25 +354,75 @@ func (kv *ShardKV) applier() {
 							kv.ITable.UpdateIdentifier(k, args.SeqTable[k], args.ReplyTable[k])
 						}
 					}
+					kv.pullTasks.Remove(args.FromGID)
+					reply = MergeReply{Err: OK}
+					Debug(DServer, "[*] S%d#%d&%d MERGE: %+v. PULLTASKS:%d#%+v", kv.me, kv.gid, kv.config.Num, args, kv.pullTasks.Len(), kv.pullTasks.Export())
+				}
+			case "ReConfig":
+				if op.Cfgnum < kv.config.Num+1 {
+					reply = ReConfigReply{Err: ErrLowerConfig}
+					retry = true
+				} else {
+					kv.pullTasks.Reset()
+					args := op.Value.(ReConfigArgs)
+					originCfg := kv.config
+					// 其他的工作协程会并发的访问kv.config，因此加锁避免读写冲突。
+
+					// 添加pull tasks
+					pullList := make(map[int][]int)
+					if originCfg.Num != 0 {
+						for sid, gid := range args.Config.Shards {
+							pullGID := originCfg.Shards[sid]
+							if gid == kv.gid && pullGID != kv.gid {
+								pullList[pullGID] = append(pullList[pullGID], sid)
+							}
+						}
+
+						if len(pullList) > 0 {
+							for gid, shards := range pullList {
+								kv.pullTasks.Add(TaskStruct{
+									Cfgnum:    args.Config.Num,
+									ToGID:     gid,
+									ToServers: originCfg.Groups[gid],
+									Shards:    shards,
+								})
+							}
+						}
+					}
+					Debug(DServer, "[*] S%d#%d&%d RECONFIG: %+v. PULLLIST:%+v", kv.me, kv.gid, kv.config.Num, args, pullList)
 					reply = ReConfigReply{Err: OK}
+
+					atomic.StoreInt64((*int64)(unsafe.Pointer(&kv.config.Num)), int64(args.Config.Num))
+					kv.config.Groups = args.Config.Groups
+					kv.config.Shards = args.Config.Shards
+
 				}
 			case "Get":
-				if op.Cfgnum != kv.config.Num {
-					reply = GetReply{Err: ErrWrongConfig}
+				if op.Cfgnum < kv.config.Num {
+					reply = GetReply{Err: ErrLowerConfig}
+					retry = true
+				} else if kv.pullTasks.Contains(key2shard(op.Key.(string))) {
+					reply = GetReply{Err: ErrMigrating}
 					retry = true
 				} else {
 					reply = kv.Database.Get(op.Key.(string))
 				}
 			case "Put":
-				if op.Cfgnum != kv.config.Num {
-					reply = PutAppendReply{Err: ErrWrongConfig}
+				if op.Cfgnum < kv.config.Num {
+					reply = PutAppendReply{Err: ErrLowerConfig}
+					retry = true
+				} else if kv.pullTasks.Contains(key2shard(op.Key.(string))) {
+					reply = PutAppendReply{Err: ErrMigrating}
 					retry = true
 				} else {
 					reply = kv.Database.Put(op.Key.(string), op.Value.(string))
 				}
 			case "Append":
-				if op.Cfgnum != kv.config.Num {
-					reply = PutAppendReply{Err: ErrWrongConfig}
+				if op.Cfgnum < kv.config.Num {
+					reply = PutAppendReply{Err: ErrLowerConfig}
+					retry = true
+				} else if kv.pullTasks.Contains(key2shard(op.Key.(string))) {
+					reply = PutAppendReply{Err: ErrMigrating}
 					retry = true
 				} else {
 					reply = kv.Database.Append(op.Key.(string), op.Value.(string))
@@ -379,7 +447,7 @@ func (kv *ShardKV) applier() {
 			// 一定要在安装完快照之后才拍摄新的快照
 			// 否则若在安装快照之前拍摄新的快照：当raft宕机恢复之后判断raft.statesize足够大了，此时数据库的状态为空！
 			if kv.maxraftstate > -1 && kv.maxraftstate <= kv.rf.RaftStateSize() {
-				Debug(DServer, "[*] S%d SNAPSHOT.", kv.me)
+				Debug(DServer, "[*] S%d SNAPSHOT. CI:%d", kv.me, applyMsg.CommandIndex)
 				kv.rf.Snapshot(applyMsg.CommandIndex, kv.Snapshot())
 			}
 		}
@@ -387,19 +455,20 @@ func (kv *ShardKV) applier() {
 }
 
 // 拍摄快照
+// 注意避免读写冲突
 func (kv *ShardKV) Snapshot() []byte {
 	snapshot := new(bytes.Buffer)
 	e := labgob.NewEncoder(snapshot)
 	if err := e.Encode(&kv.Database); err != nil {
-		log.Fatalf("S%d fail to encode database, err:%v\n", kv.me, err)
+		log.Fatalf("S%d fail to encode Database, err:%v\n", kv.me, err)
 	}
 
-	tmp := kv.ITable.Export(true)
-	if err := e.Encode(tmp.SeqTable); err != nil {
+	seqTable, replyTable := kv.ITable.Export(true)
+	if err := e.Encode(seqTable); err != nil {
 		log.Fatalf("S%d fail to encode SeqTable, err:%v\n", kv.me, err)
 	}
 
-	if err := e.Encode(tmp.ReplyTable); err != nil {
+	if err := e.Encode(replyTable); err != nil {
 		log.Fatalf("S%d fail to encode ReplyTable, err:%v\n", kv.me, err)
 	}
 
@@ -407,11 +476,16 @@ func (kv *ShardKV) Snapshot() []byte {
 		log.Fatalf("S%d fail to encode config, err:%v\n", kv.me, err)
 	}
 
-	// fmt.Printf("[*] C%d, snapshot:\ndatabase:%v\nitable:%v\n", kv.me, kv.DB, kv.ITable.SeqTable)
+	tasks := kv.pullTasks.Export()
+	if err := e.Encode(tasks); err != nil {
+		log.Fatalf("S%d fail to encode tasks, err:%v\n", kv.me, err)
+	}
+
 	return snapshot.Bytes()
 }
 
 // 安装快照
+// 注意避免读写冲突
 func (kv *ShardKV) InstallSnapshot(snapshot []byte) {
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
@@ -428,15 +502,29 @@ func (kv *ShardKV) InstallSnapshot(snapshot []byte) {
 	if err := d.Decode(&replyTable); err != nil {
 		log.Fatalf("S%d fail to decode replyTable, err:%v\n", kv.me, err)
 	}
+
+	cfg := shardctrler.Config{}
+	if err := d.Decode(&cfg); err != nil {
+		log.Fatalf("S%d fail to decode config, err:%v\n", kv.me, err)
+	}
+
+	tasks := make(map[int]TaskStruct)
+	if err := d.Decode(&tasks); err != nil {
+		log.Fatalf("S%d fail to decode tasks, err:%v\n", kv.me, err)
+	}
+
+	// 安装快照前先清空原有的内容
 	for id, seq := range seqTable {
 		kv.ITable.UpdateIdentifier(id, seq, replyTable[id])
 	}
 
-	kv.mu.Lock()
-	if err := d.Decode(&kv.config); err != nil {
-		log.Fatalf("S%d fail to decode config, err:%v\n", kv.me, err)
+	kv.pullTasks.Reset()
+	for _, taskStruct := range tasks {
+		kv.pullTasks.Add(taskStruct)
 	}
-	kv.mu.Unlock()
+	atomic.StoreInt64((*int64)(unsafe.Pointer(&kv.config.Num)), int64(cfg.Num))
+	kv.config.Groups = cfg.Groups
+	kv.config.Shards = cfg.Shards
 
 	Debug(DServer, "S%d#%d&%d INSTALL SNAPSHOT DONE. DB:%+v, SEQ:%+v, REPLY:%+v, CFG:%+v", kv.me, kv.gid, kv.config.Num, kv.Database, kv.SeqTable, kv.ReplyTable, kv.config)
 }
@@ -446,7 +534,6 @@ func (kv *ShardKV) InstallSnapshot(snapshot []byte) {
 // 将新的config和拉取到的数据封装成op交给Raft做备份，并等待其被执行。执行成功标识ReConfig完成。
 func (kv *ShardKV) poll() {
 
-loop:
 	for {
 		time.Sleep(time.Millisecond * 100)
 
@@ -458,121 +545,115 @@ loop:
 			continue
 		}
 
-		kv.mu.Lock()
-		originCfg := kv.config
-		kv.mu.Unlock()
+		Debug(DServer, "S%d#%d&%d POLL. PULLTASK LEN:%d", kv.me, kv.gid, kv.config.Num, kv.pullTasks.Len())
+		if kv.pullTasks.Len() == 0 {
 
-		cfg := kv.mck.Query(originCfg.Num + 1)
-
-		if cfg.Num == originCfg.Num {
-			continue
-		}
-
-		// 记录需要从各个group拉取的shards
-		fetchList := make(map[int][]int)
-
-		if cfg.Num > 1 {
-			for shardID, gid := range cfg.Shards {
-				if gid == kv.gid && originCfg.Shards[shardID] != kv.gid {
-					fetchList[originCfg.Shards[shardID]] = append(fetchList[originCfg.Shards[shardID]], shardID)
-				}
+			// 由于Query会超时，所以这里加上超时控制。
+			var cfg shardctrler.Config
+			originCfgNum := int(atomic.LoadInt64((*int64)(unsafe.Pointer(&kv.config.Num))))
+			cfg = kv.mck.Query(originCfgNum + 1)
+			Debug(DServer, "S%d#%d&%d QUERY CONFIG. OLDCFG:%d NEWCFG:%d.", kv.me, kv.gid, kv.config.Num, originCfgNum, cfg.Num)
+			if cfg.Num == originCfgNum {
+				continue
 			}
-		}
 
-		Debug(DServer, "S%d#%d&%d FETCH LIST: %+v", kv.me, kv.gid, originCfg.Num, fetchList)
+			reconfigArg := ReConfigArgs{Config: cfg}
+			op := Op{
+				ServerID: kv.me,
+				Kind:     "ReConfig",
+				Value:    reconfigArg,
+				Cfgnum:   cfg.Num,
 
-		mergeDB := make(Database)
-		mergeITable := NewITable()
-		pullData := []*PullReply{}
+				// 因此可以将备份组的gid，以及新config的编号作为唯一标识符。
+				// Identifier中ClerkID的最高位为1，标识该请求来自于server而不是Clerk。
+				ID: Identifier{
+					ClerkID: 1<<62 | kv.gid,
+					Seq:     cfg.Num,
+				},
+			}
 
-		// 从其它备份组拉取数据
-		if len(fetchList) > 0 {
-			wg := sync.WaitGroup{}
+			if ok, _ := kv.ITable.Executed(op.ID); ok {
+				Debug(DServer, "S%d#%d&%d SEND RECONFIG FAILED. Executed", kv.me, kv.gid, kv.config.Num)
+				continue
+			}
 
-			// 拉取fetchList中记录的shards
-			for gid, shards := range fetchList {
-				if servers, ok := originCfg.Groups[gid]; ok {
-					args := &PullArgs{
-						ShardsID: shards,
-						Cfgnum:   cfg.Num,
-						FromGID:  kv.gid,
-						ToGID:    gid,
+			index, _, isLeader := kv.rf.Start(op)
+			if !isLeader {
+				Debug(DServer, "S%d#%d&%d SEND RECONFIG FAILED. NOT LEADER", kv.me, kv.gid, kv.config.Num)
+				continue
+			}
+			Debug(DServer, "S%d#%d&%d SEND RECONFIG: %+v", kv.me, kv.gid, kv.config.Num, reconfigArg)
+
+			// 等待Raft提交ReConfig请求并执行。
+			// 如果ReConfig请求执行成功，说明ReConfig请求完成
+			// 再来一遍，否则重新更新config。
+			kv.WaitAndMatch(index, op)
+		} else {
+			tasks := kv.pullTasks.Export()
+			Debug(DServer, "S%d#%d&%d PULL TASKS:%+v", kv.me, kv.gid, kv.config.Num, tasks)
+
+			// 执行拉取协程，从gid标识的备份组拉取ts.Shards对应的数据
+			for gid, taskStruct := range tasks {
+				go func(gid int, ts TaskStruct) {
+					pullargs := PullArgs{
+						Shards:  ts.Shards,
+						Cfgnum:  ts.Cfgnum,
+						FromGID: kv.gid,
+						ToGID:   gid,
 					}
-					wg.Add(1)
-					go func(agrs *PullArgs, originCfgnum int, servers []string) {
-						defer wg.Done()
-						Debug(DServer, "S%d#%d&%d FETCH:%v FROM %v.", kv.me, kv.gid, originCfgnum, args.ShardsID, args.FromGID)
 
-						reply := kv.pull(args, originCfgnum, servers)
-
-						Debug(DServer, "S%d#%d&%d FETCH:%v FROM %v. reply:%+v", kv.me, kv.gid, originCfgnum, args.ShardsID, args.FromGID, servers, reply)
-						if reply != nil {
-							pullData = append(pullData, reply)
-						}
-					}(args, originCfg.Num, servers)
-				}
-			}
-			wg.Wait()
-
-			// 没有数据没有拉取成功
-			if len(pullData) != len(fetchList) {
-				continue loop
-			}
-
-			for _, pd := range pullData {
-				// 将拉取到的数据组合起来
-				for k, v := range pd.DB {
-					mergeDB[k] = v
-				}
-
-				for k := range pd.SeqTable {
-					if pd.SeqTable[k] >= mergeITable.SeqTable[k] {
-						mergeITable.SeqTable[k] = pd.SeqTable[k]
-						mergeITable.ReplyTable[k] = pd.ReplyTable[k]
+					Debug(DServer, "[*] S%d#%d&%d CALL `ShardKV.Pull`: %+v", kv.me, kv.gid, kv.config.Num, pullargs)
+					reply := kv.pull(&pullargs, ts.ToServers)
+					if reply == nil {
+						return
 					}
-				}
+
+					mergeArgs := MergeArgs{
+						FromGID:    gid,
+						DB:         reply.DB,
+						SeqTable:   reply.SeqTable,
+						ReplyTable: reply.ReplyTable,
+					}
+
+					op := Op{
+						ServerID: kv.me,
+						Kind:     "Merge",
+						Value:    mergeArgs,
+						Cfgnum:   ts.Cfgnum,
+
+						// 因此可以将被拉取备份组的gid，以及新config的编号作为唯一标识符。
+						// Identifier中ClerkID的最高位为1，标识该请求来自于server而不是Clerk。
+						ID: Identifier{
+							ClerkID: 1<<62 | gid,
+							Seq:     ts.Cfgnum,
+						},
+					}
+
+					if ok, _ := kv.ITable.Executed(op.ID); ok {
+						return
+					}
+
+					index, _, isLeader := kv.rf.Start(op)
+					if !isLeader {
+						return
+					}
+
+					// 等待Raft提交ReConfig请求并执行。
+					// 如果ReConfig请求执行成功，说明ReConfig请求完成
+					// 再来一遍，否则重新更新config。
+					kv.WaitAndMatch(index, op)
+
+				}(gid, taskStruct)
 			}
 		}
-
-		// 将reconfig的请求交由Raft做备份
-		args := ReConfigArgs{
-			Config:     cfg,
-			DB:         mergeDB,
-			SeqTable:   mergeITable.SeqTable,
-			ReplyTable: mergeITable.ReplyTable,
-		}
-
-		op := Op{
-			ServerID: kv.me,
-			Kind:     "ReConfig",
-			Value:    args,
-			Cfgnum:   cfg.Num,
-
-			// 因此可以将备份组的gid，以及新config的编号作为唯一标识符。
-			// Identifier中ClerkID的最高位为1，标识该请求来自于server而不是Clerk。
-			ID: Identifier{
-				ClerkID: 1<<62 | kv.gid,
-				Seq:     cfg.Num,
-			},
-		}
-
-		index, _, isLeader := kv.rf.Start(op)
-		if !isLeader {
-			continue
-		}
-		// 等待Raft提交ReConfig请求并执行。
-		// 如果ReConfig请求执行成功，说明ReConfig请求完成
-		// 再来一遍，否则重新更新config。
-		kv.WaitAndMatch(index, op)
-
 	}
 }
 
 // 向servers标识的备份组拉取shardID对应的切片
-func (kv *ShardKV) pull(args *PullArgs, originCfgnum int, servers []string) *PullReply {
+func (kv *ShardKV) pull(args *PullArgs, servers []string) *PullReply {
 
+	t := time.NewTimer(time.Second)
 	for {
-
 		for i := 0; i < len(servers); i++ {
 
 			if kv.killed() {
@@ -580,16 +661,10 @@ func (kv *ShardKV) pull(args *PullArgs, originCfgnum int, servers []string) *Pul
 			}
 
 			// reconfig 成功，无需再拉取
-
-			kv.mu.Lock()
-			cfgnum := kv.config.Num
-			kv.mu.Unlock()
-
-			if cfgnum != originCfgnum {
+			cfgnum := int(atomic.LoadInt64((*int64)(unsafe.Pointer(&kv.config.Num))))
+			if cfgnum != args.Cfgnum {
 				return nil
 			}
-
-			Debug(DServer, "[*] S%d#%d&%d PULL CFG:%d, SHARDS:%+v FROM SRVS:%v", kv.me, kv.gid, originCfgnum, args.Cfgnum, args.ShardsID, servers)
 
 			srv := kv.make_end(servers[i])
 			retCh := make(chan bool, 1) // 这里必须是带缓冲的，为了能够让工作协程顺利退出
@@ -599,28 +674,26 @@ func (kv *ShardKV) pull(args *PullArgs, originCfgnum int, servers []string) *Pul
 				retCh <- srv.Call("ShardKV.Pull", args, reply)
 			}()
 
+			ResetTimer(t, time.Second)
+
 			var ok bool
 			select {
 			case ok = <-retCh:
-			case <-time.After(raft.HEARTBEAT * 10):
-				ok = false
+				t.Stop()
+			case <-t.C:
 			}
 
 			// Call返回false或者定时器到期，表明请求超时
-			if !ok {
-				time.Sleep(raft.HEARTBEAT * 1)
-			} else {
-
+			if ok {
 				switch reply.Err {
 				case OK:
 					return reply
 				case ErrWrongLeader:
-				case ErrWrongConfig:
-					time.Sleep(raft.HEARTBEAT * 1)
+				case ErrHigherConfig:
+					time.Sleep(time.Millisecond * 100)
 				}
 			}
 		}
-		// 如果所有的server都不是leader，那就等待300ms
-		time.Sleep(raft.HEARTBEAT * 1)
+		time.Sleep(time.Millisecond * 200)
 	}
 }
