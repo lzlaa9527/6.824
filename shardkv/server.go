@@ -632,7 +632,6 @@ func (kv *ShardKV) poll() {
 					if ok, _ := kv.ITable.Executed(op.ID); ok {
 						return
 					}
-
 					index, _, isLeader := kv.rf.Start(op)
 					if !isLeader {
 						return
@@ -652,48 +651,34 @@ func (kv *ShardKV) poll() {
 // 向servers标识的备份组拉取shardID对应的切片
 func (kv *ShardKV) pull(args *PullArgs, servers []string) *PullReply {
 
-	t := time.NewTimer(time.Second)
-	for {
-		for i := 0; i < len(servers); i++ {
+	for i := 0; i < len(servers); i++ {
 
-			if kv.killed() {
-				return nil
-			}
-
-			// reconfig 成功，无需再拉取
-			cfgnum := int(atomic.LoadInt64((*int64)(unsafe.Pointer(&kv.config.Num))))
-			if cfgnum != args.Cfgnum {
-				return nil
-			}
-
-			srv := kv.make_end(servers[i])
-			retCh := make(chan bool, 1) // 这里必须是带缓冲的，为了能够让工作协程顺利退出
-			reply := new(PullReply)
-
-			go func() {
-				retCh <- srv.Call("ShardKV.Pull", args, reply)
-			}()
-
-			ResetTimer(t, time.Second)
-
-			var ok bool
-			select {
-			case ok = <-retCh:
-				t.Stop()
-			case <-t.C:
-			}
-
-			// Call返回false或者定时器到期，表明请求超时
-			if ok {
-				switch reply.Err {
-				case OK:
-					return reply
-				case ErrWrongLeader:
-				case ErrHigherConfig:
-					time.Sleep(time.Millisecond * 100)
-				}
-			}
+		if kv.killed() {
+			return nil
 		}
-		time.Sleep(time.Millisecond * 200)
+
+		// reconfig 成功，无需再拉取
+		cfgnum := int(atomic.LoadInt64((*int64)(unsafe.Pointer(&kv.config.Num))))
+		if cfgnum != args.Cfgnum {
+			return nil
+		}
+
+		srv := kv.make_end(servers[i])
+		retCh := make(chan bool, 1) // 这里必须是带缓冲的，为了能够让工作协程顺利退出
+		reply := new(PullReply)
+
+		go func() {
+			retCh <- srv.Call("ShardKV.Pull", args, reply)
+		}()
+
+		select {
+		case <-retCh:
+		case <-time.After(time.Millisecond * 30):
+		}
+
+		if reply.Err == OK {
+			return reply
+		}
 	}
+	return nil
 }
