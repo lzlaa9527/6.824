@@ -222,8 +222,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}()
 
 	for ; i < len(rf.Log) && j < len(args.Log); i, j = i+1, j+1 {
-		// 日志term不匹配，或者term匹配但是一个是快照，一个不是也不行
-		if rf.Log[i].Term != args.Log[j].Term || rf.Log[i].CommandValid == args.Log[j].SnapshotValid {
+		// 日志term不匹配，或者term匹配但是一个是快照，一个不是也不行。
+		if rf.Log[i].Term != args.Log[j].Term || (rf.Log[i].CommandValid == args.Log[j].SnapshotValid && rf.Log[i].CommandValid) {
 			break
 		}
 	}
@@ -333,7 +333,7 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 		Debug(dAppend, "[%d] R%d UPDATE M&N -> R%d, MI:%d, NI:%d", image.CurrentTerm, image.me, peerIndex, newMatchIndex, newNextIndex)
 
 		// 通知LEADER提交日志
-		if newMatchIndex > matchIndex {
+		if reply.Success {
 			image.Raft.updateCommitIndex(image, newMatchIndex)
 		}
 	}
