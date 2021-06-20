@@ -119,9 +119,11 @@ func (ck *Clerk) Append(key string, value string) {
 // 否则就是调用ShardKV.Put/Append/Get
 func (ck *Clerk) doRPC(method string, key string, arg interface{}, reply interface{}) interface{} {
 
+	// 避免因为执行太快，导致测试代码误判不满足线性一致性。
+	time.Sleep(time.Millisecond * 1)
+
 	replyType := reflect.TypeOf(reply).Elem()
 	t := time.NewTimer(time.Second)
-
 	for {
 
 		shard := key2shard(key)
@@ -135,11 +137,11 @@ func (ck *Clerk) doRPC(method string, key string, arg interface{}, reply interfa
 			continue
 		}
 
-		Debug(DClient, "[*] C%d CALL `%s` TO S%d#%d, SEQ:%d, CFG:%d", ck.ClerkID, method, ck.leaderID, gid, ck.OpSeq-1, ck.config.Num)
 		reply = reflect.New(replyType).Interface()
 		retCh := make(chan bool, 1) // 这里必须是带缓冲的，为了能够让工作协程顺利退出
 
 		go func() {
+			Debug(DClient, "[*] C%d CALL `%s` TO S%d#%d, SEQ:%d, CFG:%d", ck.ClerkID, method, ck.leaderID, gid, ck.OpSeq-1, ck.config.Num)
 			srv := ck.make_end(servers[ck.leaderID])
 			retCh <- srv.Call(method, arg, reply)
 		}()
@@ -150,6 +152,7 @@ func (ck *Clerk) doRPC(method string, key string, arg interface{}, reply interfa
 		case ok = <-retCh:
 			t.Stop()
 		case <-t.C:
+			Debug(DClient, "[*] C%d CALL `%s` TO S%d#%d TIMEOUT. SEQ:%d, CFG:%d", ck.ClerkID, method, ck.leaderID, gid, ck.OpSeq-1, ck.config.Num)
 		}
 
 		// Call返回false或者定时器到期，表明请求超时
@@ -166,22 +169,19 @@ func (ck *Clerk) doRPC(method string, key string, arg interface{}, reply interfa
 
 			case ErrHigherConfig:
 				time.Sleep(time.Millisecond * 100)
-				ck.leaderID = (ck.leaderID + 1) % len(servers)
 
 			case ErrWrongLeader:
 				ck.leaderID = (ck.leaderID + 1) % len(servers)
+
 			case ErrMigrating:
 				time.Sleep(time.Millisecond * 100)
 			}
 		} else {
-			Debug(DClient, "[*] C%d  CALL `%s` TO S%d#%d TIMEOUT SEQ:%d, CFG:%d", ck.ClerkID, method, ck.leaderID, gid, ck.OpSeq-1, ck.config.Num)
-			ck.config = ck.sm.Query(-1)
-			reflect.ValueOf(arg).Elem().FieldByName("Cfgnum").SetInt(int64(ck.config.Num))
-			Debug(DClient, "[*] C%d FETCH CONFIG: %d#%+v", ck.ClerkID, ck.config.Num, ck.config.Shards)
+
 			ck.leaderID = (ck.leaderID + 1) % len(servers)
 		}
 
-		if ck.leaderID == 0 {
+		if ck.leaderID%len(servers) == 0 {
 			time.Sleep(time.Millisecond * 100)
 		}
 	}

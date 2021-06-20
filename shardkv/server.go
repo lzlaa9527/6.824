@@ -29,11 +29,11 @@ type ShardKV struct {
 	mck    *shardctrler.Clerk // kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 	config shardctrler.Config // 当前应用的config
 
-	OpReplys // 存储server已经处理的Op及其结果
-	ITable   // 记录每个客户端待处理的Op二元组标识符：(ClerkID, OpSeq)；需要持久化保存
-	Database // 数据库；需要持久化保存
+	OpReplys // 存储server已经处理的Op及其结果；当Op处理完成后，唤醒响应的等待的工作协程让其返回。
+	ITable   // 存储每个客户端待处理的Op二元组标识符：(ClerkID, OpSeq)；需要持久化保存
+	Database // 数据库；需要持久化保存。
 
-	pullTasks Tasks
+	pullTasks PullTasks // 存储当前config尚未完成的拉取任务，和正在迁移的数据切片。
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -146,9 +146,8 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
-// Pull 向其它group提供的拉取数据的接口。
-// 要求args.Cfgnum < config.Num，也就是说当reconfig与数据库操作请求同时到达时
-// 必须先完成请求数据库操作请求，再进行数据迁移。
+// Pull 向其它备份组提供的拉取数据的接口。
+// 被拉去的server必须是其所在备份组的leader，并且要求args.Cfgnum == kv.Config.Num。
 func (kv *ShardKV) Pull(args *PullArgs, reply *PullReply) {
 
 	op := Op{
@@ -161,13 +160,12 @@ func (kv *ShardKV) Pull(args *PullArgs, reply *PullReply) {
 		// 需要为其设置唯一标识符。
 		// Identifier中ClerkID的最高位为1，标识该请求来自于server而不是Clerk。
 		ID: Identifier{
-			ClerkID: (1 << 62) | (args.FromGID << 31) | args.ToGID,
+
+			ClerkID: (1 << 62) | (args.FromGID << 31) | kv.gid,
 			Seq:     args.Cfgnum,
 		},
 	}
 
-	// 如果只检查Executed，存在数据冲突的情况。
-	// 在执行Exectued后执行InstallSnapshot，Executed检查通过，但是GetCacheReply返回nil
 	if ok, ret := kv.ITable.Executed(op.ID); ok {
 		Debug(DServer, "[*] S%d#%d&%d EXECUTED `Pull` OP:%+v", kv.me, kv.gid, kv.config.Num, args)
 
@@ -599,7 +597,6 @@ func (kv *ShardKV) poll() {
 						Shards:  ts.Shards,
 						Cfgnum:  ts.Cfgnum,
 						FromGID: kv.gid,
-						ToGID:   gid,
 					}
 
 					Debug(DServer, "[*] S%d#%d&%d CALL `ShardKV.Pull`: %+v", kv.me, kv.gid, kv.config.Num, pullargs)
@@ -652,48 +649,34 @@ func (kv *ShardKV) poll() {
 // 向servers标识的备份组拉取shardID对应的切片
 func (kv *ShardKV) pull(args *PullArgs, servers []string) *PullReply {
 
-	t := time.NewTimer(time.Second)
-	for {
-		for i := 0; i < len(servers); i++ {
+	for i := 0; i < len(servers); i++ {
 
-			if kv.killed() {
-				return nil
-			}
-
-			// reconfig 成功，无需再拉取
-			cfgnum := int(atomic.LoadInt64((*int64)(unsafe.Pointer(&kv.config.Num))))
-			if cfgnum != args.Cfgnum {
-				return nil
-			}
-
-			srv := kv.make_end(servers[i])
-			retCh := make(chan bool, 1) // 这里必须是带缓冲的，为了能够让工作协程顺利退出
-			reply := new(PullReply)
-
-			go func() {
-				retCh <- srv.Call("ShardKV.Pull", args, reply)
-			}()
-
-			ResetTimer(t, time.Second)
-
-			var ok bool
-			select {
-			case ok = <-retCh:
-				t.Stop()
-			case <-t.C:
-			}
-
-			// Call返回false或者定时器到期，表明请求超时
-			if ok {
-				switch reply.Err {
-				case OK:
-					return reply
-				case ErrWrongLeader:
-				case ErrHigherConfig:
-					time.Sleep(time.Millisecond * 100)
-				}
-			}
+		if kv.killed() {
+			return nil
 		}
-		time.Sleep(time.Millisecond * 200)
+
+		// reconfig 成功，无需再拉取
+		cfgnum := int(atomic.LoadInt64((*int64)(unsafe.Pointer(&kv.config.Num))))
+		if cfgnum != args.Cfgnum {
+			return nil
+		}
+
+		srv := kv.make_end(servers[i])
+		retCh := make(chan bool, 1) // 这里必须是带缓冲的，为了能够让工作协程顺利退出
+		reply := new(PullReply)
+
+		go func() {
+			retCh <- srv.Call("ShardKV.Pull", args, reply)
+		}()
+
+		select {
+		case <-retCh:
+		case <-time.After(time.Millisecond * 30):
+		}
+
+		if reply.Err == OK {
+			return reply
+		}
 	}
+	return nil
 }

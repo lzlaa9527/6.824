@@ -87,42 +87,42 @@ func (ck *Clerk) Move(shard int, gid int) {
 
 func (ck *Clerk) doRPC(method string, arg interface{}, reply interface{}) interface{} {
 
+	// 避免因为执行太快，导致测试代码误判不满足线性一致性。
+	time.Sleep(time.Millisecond * 1)
+
 	t := time.NewTimer(time.Second)
 	replyType := reflect.TypeOf(reply).Elem()
 	for {
-		Debug(DClient, "[*] C%d CALL %s TO S%d, SEQ:%d", ck.ClerkID, method, ck.leaderID, ck.OpSeq-1)
 
 		reply = reflect.New(replyType).Interface()
 		retCh := make(chan bool, 1) // 这里必须是带缓冲的，为了能够让工作协程顺利退出
 		go func() {
+			Debug(DClient, "[*] C%d CALL %s TO S%d, SEQ:%d", ck.ClerkID, method, ck.leaderID, ck.OpSeq-1)
 			retCh <- ck.servers[ck.leaderID].Call(method, arg, reply)
 		}()
 
-		var ok bool
-
 		ResetTimer(t, time.Second)
 		select {
-		case ok = <-retCh:
+		case <-retCh:
 			t.Stop()
 		case <-t.C:
+			Debug(DClient, "[*] C%d CALL %s TO S%d TIMEOUT. SEQ:%d", ck.ClerkID, method, ck.leaderID, ck.OpSeq-1)
 		}
 
-		// Call返回false或者定时器到期，表明请求超时
-		if ok {
-			Debug(DClient, "[*] C%d RECEIVE %s REPLY, SEQ: %d; %+v", ck.ClerkID, method, ck.OpSeq-1, reply)
-
-			switch reflect.ValueOf(reply).Elem().FieldByName("Err").Interface().(Err) {
-			case OK:
-				return reply
-			case ErrWrongLeader:
-				Debug(DClient, "[*] S%d WRONG LEADER.", ck.leaderID)
-				ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
-			}
-		} else {
+		Debug(DClient, "[*] C%d RECEIVE %s REPLY, SEQ: %d; %+v", ck.ClerkID, method, ck.OpSeq-1, reply)
+		switch reflect.ValueOf(reply).Elem().FieldByName("Err").Interface().(Err) {
+		case OK:
+			return reply
+		case ErrWrongLeader:
+			Debug(DClient, "[*] S%d WRONG LEADER.", ck.leaderID)
 			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
 		}
 
-		if ck.leaderID == 0 {
+		ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
+
+		// 所有的server都不是leader；
+		// 就等待一会等他们选举出leader。
+		if ck.leaderID%len(ck.servers) == 0 {
 			time.Sleep(time.Millisecond * 100)
 		}
 	}

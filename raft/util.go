@@ -28,7 +28,7 @@ const (
 )
 
 var debugStart time.Time
-var debug = 0
+var debug = 1
 
 // Retrieve the verbosity level from an environment variable
 func getVerbosity() int {
@@ -61,7 +61,7 @@ func Debug(topic logTopic, format string, a ...interface{}) {
 	if debug >= 1 {
 		time := time.Since(debugStart).Microseconds()
 		time /= 100
-		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
+		prefix := fmt.Sprintf("  ###  %06d %v ", time, string(topic))
 		format = prefix + format
 		log.Printf(format, a...)
 	}
