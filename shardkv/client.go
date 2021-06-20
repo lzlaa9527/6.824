@@ -177,7 +177,6 @@ func (ck *Clerk) doRPC(method string, key string, arg interface{}, reply interfa
 				time.Sleep(time.Millisecond * 100)
 			}
 		} else {
-
 			ck.leaderID = (ck.leaderID + 1) % len(servers)
 		}
 
