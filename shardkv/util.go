@@ -1,4 +1,4 @@
-package shardctrler
+package shardkv
 
 import (
 	"fmt"
@@ -18,7 +18,7 @@ const (
 )
 
 var debugStart time.Time
-var debug = 0
+var debug = 1
 
 // Retrieve the verbosity level from an environment variable
 func getVerbosity() int {
@@ -54,3 +54,4 @@ func Debug(topic logTopic, format string, a ...interface{}) {
 func min(a, b int) int { return int(math.Min(float64(a), float64(b))) }
 
 func max(a, b int) int { return int(math.Max(float64(a), float64(b))) }
+

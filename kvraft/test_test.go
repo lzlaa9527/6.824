@@ -430,6 +430,11 @@ func TestConcurrent3A(t *testing.T) {
 	GenericTest(t, "3A", 5, 5, false, false, false, -1, false)
 }
 
+func TestConcurrent3A2(t *testing.T) {
+	// Test: many clients (3A) ...
+	GenericTest(t, "3A", 10, 1, false, false, false, -1, false)
+}
+
 func TestUnreliable3A(t *testing.T) {
 	// Test: unreliable net, many clients (3A) ...
 	GenericTest(t, "3A", 5, 5, true, false, false, -1, false)

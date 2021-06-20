@@ -58,20 +58,20 @@ func check_same_config(t *testing.T, c1 Config, c2 Config) {
 		t.Fatalf("Num wrong")
 	}
 	if c1.Shards != c2.Shards {
-		t.Fatalf("Shards wrong")
+		t.Fatalf("shards wrong")
 	}
 	if len(c1.Groups) != len(c2.Groups) {
-		t.Fatalf("number of Groups is wrong")
+		t.Fatalf("number of groups is wrong")
 	}
 	for gid, sa := range c1.Groups {
 		sa1, ok := c2.Groups[gid]
 		if ok == false || len(sa1) != len(sa) {
-			t.Fatalf("len(Groups) wrong")
+			t.Fatalf("len(groups) wrong")
 		}
 		if ok && len(sa1) == len(sa) {
 			for j := 0; j < len(sa); j++ {
 				if sa[j] != sa1[j] {
-					t.Fatalf("Groups wrong")
+					t.Fatalf("groups wrong")
 				}
 			}
 		}

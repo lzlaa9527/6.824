@@ -4,6 +4,7 @@ import (
 	. "6.824/common"
 	"6.824/labrpc"
 	"6.824/raft"
+	"reflect"
 	"time"
 )
 
@@ -41,48 +42,8 @@ func (ck *Clerk) Get(key string) string {
 
 	time.Sleep(1 * time.Millisecond)
 
-	co := 0
-	for {
-
-		Debug(DClient, "[*] C%d SEND GET_REQ TO S%d", ck.ClerkID, ck.leaderID)
-		reply := &GetReply{}
-
-		retCh := make(chan bool, 1) // 这里必须是带缓冲的，为了能够让工作协程顺利退出
-		go func() {
-			retCh <- ck.servers[ck.leaderID].Call("KVServer.Get", arg, reply)
-		}()
-
-		var ok bool
-		select {
-		case ok = <-retCh:
-		case <-time.After(raft.HEARTBEAT * 10): // 请求超时
-			ok = false
-		}
-
-		// Call返回false或者定时器到期，表明请求超时
-		if !ok {
-			Debug(DClient, "[*] C%d RPC:%d TIMEOUT", ck.ClerkID, ck.OpSeq-1)
-			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
-			co++
-		} else {
-			Debug(DClient, "[*] C%d GET REPLY:%+v", ck.ClerkID, reply)
-			switch reply.Err {
-			case OK:
-				return reply.Value
-			case ErrNoKey:
-				return ""
-			case ErrWrongLeader:
-				ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
-				co++
-			}
-		}
-
-		// 如果所有的server都不是leader，那就等待300ms
-		if (co+1)%len(ck.servers) == 0 {
-			time.Sleep(raft.HEARTBEAT * 3)
-		}
-
-	}
+	reply := ck.doRPC("KVServer.Get", arg, &GetReply{}).(*GetReply)
+	return reply.Value
 }
 
 func (ck *Clerk) PutAppend(key string, value string, op string) {
@@ -96,14 +57,28 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.OpSeq++
 	time.Sleep(1 * time.Millisecond)
 
-	co := 0
-	for {
-		Debug(DClient, "[*] C%d SEND PA_REQ TO S%d", ck.ClerkID, ck.leaderID)
-		reply := &PutAppendReply{}
+	ck.doRPC("KVServer.PutAppend", arg, &PutAppendReply{})
+}
 
+func (ck *Clerk) Put(key string, value string) {
+	ck.PutAppend(key, value, "Put")
+}
+func (ck *Clerk) Append(key string, value string) {
+	ck.PutAppend(key, value, "Append")
+}
+
+func (ck *Clerk) doRPC(method string, arg interface{}, reply interface{}) interface{} {
+
+	co := 0
+
+	replyType := reflect.TypeOf(reply).Elem()
+	for {
+		Debug(DClient, "[*] C%d CALL %s TO S%d, SEQ:%d", ck.ClerkID, method, ck.leaderID, ck.OpSeq-1)
+
+		reply = reflect.New(replyType).Interface()
 		retCh := make(chan bool, 1) // 这里必须是带缓冲的，为了能够让工作协程顺利退出
 		go func() {
-			retCh <- ck.servers[ck.leaderID].Call("KVServer.PutAppend", arg, reply)
+			retCh <- ck.servers[ck.leaderID].Call(method, arg, reply)
 		}()
 
 		var ok bool
@@ -115,30 +90,26 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 		// Call返回false或者定时器到期，表明请求超时
 		if !ok {
-			Debug(DClient, "[*] C%d RPC:%d TIMEOUT", ck.ClerkID, ck.OpSeq-1)
 			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
 			co++
+			Debug(DClient, "[*] C%d CALL %s TIMEOUT, SEQ: %d", ck.ClerkID, method, ck.OpSeq-1)
 		} else {
-			Debug(DClient, "[*] C%d PA REPLY:%+v", ck.ClerkID, reply)
-			switch reply.Err {
-			case OK:
-				return
+			// Debug(DClient, "[*] C%d RECEIVE %s REPLY, SEQ: %d; %+v", ck.ClerkID, method, ck.OpSeq-1, reply)
+
+			switch reflect.ValueOf(reply).Elem().FieldByName("Err").Interface().(Err) {
+			case OK, ErrNoKey:
+				Debug(DClient, "[*] S%d %s DONE.", ck.leaderID, method)
+				return reply
 			case ErrWrongLeader:
+				// Debug(DClient, "[*] S%d WRONG LEADER.", ck.leaderID)
 				ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
 				co++
 			}
-
 		}
+
 		// 如果所有的server都不是leader，那就等待300ms
 		if co%len(ck.servers) == 0 {
 			time.Sleep(raft.HEARTBEAT * 3)
 		}
 	}
-}
-
-func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
-}
-func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
 }

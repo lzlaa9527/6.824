@@ -40,7 +40,6 @@ type Raft struct {
 	*RWLog // 并发安全的日志条目数组
 
 	commitIndex int
-
 	lastApplied int
 	applyCh     chan ApplyMsg
 	commitCh    chan int
@@ -48,6 +47,7 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 	// nmmutex    []*sync.RWMutex // 保证nextIndex、matchIndex的并发读写的正确性
+	gid int
 }
 
 func (rf *Raft) GetState() (int, bool) {
@@ -78,8 +78,6 @@ func (rf *Raft) persist() {
 		state := w.Bytes()
 		rf.persister.SaveRaftState(state)
 	}
-	Debug(DPersist, "[%d] R%d SAVE STATE, VF:%d, SI:%d, Log:%v", rf.CurrentTerm, rf.me, rf.VotedFor, rf.RWLog.SnapshotIndex, rf.RWLog.String())
-
 }
 
 func (rf *Raft) readPersist() {
@@ -102,15 +100,15 @@ func (rf *Raft) readPersist() {
 		d := labgob.NewDecoder(r)
 
 		if err := d.Decode(&rf.CurrentTerm); err != nil {
-			log.Fatalf("R%d fail to read CurrentTerm, err:%v\n", rf.me, err)
+			log.Fatalf("R%d#%d fail to read CurrentTerm, err:%v\n", rf.me, err)
 		}
 
 		if err := d.Decode(&rf.VotedFor); err != nil {
-			log.Fatalf("R%d fail to read VotedFor, err:%v\n", rf.me, err)
+			log.Fatalf("R%d#%d fail to read VotedFor, err:%v\n", rf.me, err)
 		}
 
 		if err := d.Decode(&rf.Log); err != nil {
-			log.Fatalf("R%d fail to read Log, err:%v\n", rf.me, err)
+			log.Fatalf("R%d#%d fail to read Log, err:%v\n", rf.me, err)
 		}
 
 		if rf.persister.SnapshotSize() > 0 {
@@ -120,7 +118,7 @@ func (rf *Raft) readPersist() {
 			var entry Entry
 
 			if err := d.Decode(&entry); err != nil {
-				log.Fatalf("R%d fail to read snapshot, err:%v\n", rf.me, err)
+				log.Fatalf("R%d#%d fail to read snapshot, err:%v\n", rf.me, err)
 			}
 			rf.Log = append([]Entry{entry}, rf.Log...) // 保证快照是Log的第一个条目
 		}
@@ -160,7 +158,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:     term,
 			Index:    index,
 		})
-		Debug(DClient, "[%d] R%d APPEND ENTRY. IN:%d, TE:%d， CO:%v", rf.CurrentTerm, rf.me, index, rf.Log[index-rf.RWLog.SnapshotIndex].Term, command)
+		Debug(DClient, "[%d] R%d#%d APPEND ENTRY. IN:%d, TE:%d", rf.CurrentTerm, rf.me, rf.gid, index, rf.Log[index-rf.RWLog.SnapshotIndex].Term)
 		rf.RWLog.mu.Unlock()
 		rf.resetTimer()
 
@@ -182,11 +180,11 @@ func (rf *Raft) killed() bool {
 	}
 }
 
-const HEARTBEAT = 100 * time.Millisecond
+const HEARTBEAT = 80 * time.Millisecond
 
 // 选举超时时间至少是心跳时间的3倍
 func electionTime() time.Duration {
-	d := rand.Intn(300) + 300
+	d := rand.Intn(250) + 350
 	return time.Duration(d) * time.Millisecond
 }
 
@@ -202,13 +200,14 @@ func (rf *Raft) resetTimer() {
 	case FOLLOWER:
 		ELT := electionTime()
 		rf.timer.Reset(ELT)
-		Debug(DTimer, "[%d] R%d CONVERT FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
+		Debug(DTimer, "[%d] R%d#%d CONVERT FOLLOWER, ELT:%d", rf.CurrentTerm, rf.me, rf.gid, ELT.Milliseconds())
+
 	case CANDIDATE:
 		ELT := electionTime()
 		rf.timer.Reset(ELT)
-		Debug(DTimer, "[%d] R%d CONVERT CANDIDATE, ELT:%d", rf.CurrentTerm, rf.me, ELT.Milliseconds())
+		Debug(DTimer, "[%d] R%d#%d CONVERT CANDIDATE, ELT:%d", rf.CurrentTerm, rf.me, rf.gid, ELT.Milliseconds())
 	case LEADER:
-		Debug(DTimer, "[%d] R%d HEARTBEAT.", rf.CurrentTerm, rf.me)
+		Debug(DTimer, "[%d] R%d#%d HEARTBEAT.", rf.CurrentTerm, rf.me, rf.gid)
 		rf.timer.Reset(HEARTBEAT)
 	}
 }
@@ -218,7 +217,7 @@ func (rf *Raft) ticker() {
 	for {
 		select {
 		case <-rf.dead:
-			Debug(DKill, "[%d] R%d BE KILLED", rf.CurrentTerm, rf.me)
+			Debug(DKill, "[%d] R%d#%d BE KILLED", rf.CurrentTerm, rf.me, rf.gid)
 			close(rf.done) // 通知所有的工作协程退出
 			rf.timer.Stop()
 			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
@@ -237,7 +236,7 @@ func (rf *Raft) ticker() {
 				rf.CurrentTerm++
 				rf.VotedFor = rf.me
 				// server的状态发生改变，原来的Image虽之失效
-				Debug(DTimer, "[%d] R%d CLOSE image.done", rf.CurrentTerm, rf.me)
+				Debug(DTimer, "[%d] R%d#%d CLOSE image.done", rf.CurrentTerm, rf.me, rf.gid)
 				close(rf.Image.done)
 				rf.Image.done = make(chan signal)
 			}
@@ -255,6 +254,9 @@ func (rf *Raft) ticker() {
 		switch rf.State {
 		case FOLLOWER:
 		case CANDIDATE:
+			if rf.gid != 0 {
+				log.Printf("[%d] R%d#%d CONVERT CANDIDATE.\n", rf.CurrentTerm, rf.me, rf.gid)
+			}
 			rf.sendRequestVote()
 		case LEADER:
 			rf.SendAppendEntries()
@@ -289,7 +291,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.applier()
 
 	// start ticker goroutine to start elections
-	Debug(DTest, "[%d] R%d START.", rf.CurrentTerm, rf.me)
+	Debug(DTest, "[%d] R%d#%d START.", rf.CurrentTerm, rf.me, rf.gid)
 
 	return rf
+}
+
+func (rf *Raft) SetGID(gid int) {
+	rf.gid = gid
 }

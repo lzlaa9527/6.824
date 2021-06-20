@@ -38,19 +38,16 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			Seq:     args.OpSeq,
 		},
 	}
-	Debug(DServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
+	// Debug(DServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
 
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-
-		Debug(DServer, "[*] S%d NOT LEADER.", kv.me)
 		return
 	}
-	Debug(DServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
+	// Debug(DServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
 
 	ret, err := kv.WaitAndMatch(index, op)
-	// Debug(DServer, "[*] S%d GET REPLY, SEQ: %d.", kv.me, index)
 	if ret == nil {
 		reply.Err = err
 	} else {
@@ -72,14 +69,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		},
 	}
 
-	Debug(DServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
+	// Debug(DServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		Debug(DServer, "[*] S%d NOT LEADER.", kv.me)
 		return
 	}
-	// Debug(DServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
 
 	ret, err := kv.WaitAndMatch(index, op)
 	if ret == nil {
@@ -93,6 +88,7 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	kv.OpReplys.Destory() // 通知尚未退出的clerk退出
+	Debug(DServer, "S%d Stop!", kv.me)
 }
 
 func (kv *KVServer) killed() bool {
@@ -139,19 +135,18 @@ func (kv *KVServer) applier() {
 		}
 
 		if applyMsg.SnapshotValid { // 应用snapshot
-			Debug(DServer, "[*] S%d INSTALL SNAPSHOT. IN:%d, TERM:%d", kv.me, applyMsg.SnapshotIndex, applyMsg.SnapshotTerm)
+			// Debug(DServer, "[*] S%d INSTALL SNAPSHOT. IN:%d, TERM:%d", kv.me, applyMsg.SnapshotIndex, applyMsg.SnapshotTerm)
 
 			kv.InstallSnapshot(applyMsg.Snapshot)
 		} else { // 应用普通的日志条目
-			Debug(DServer, "[*] S%d RECEIVE LOG ENTRY. IN:%d, CMD:%+v", kv.me, applyMsg.CommandIndex, applyMsg.Command)
+			// Debug(DServer, "[*] S%d RECEIVE LOG ENTRY. IN:%d, CMD:%+v", kv.me, applyMsg.CommandIndex, applyMsg.Command)
 
 			op := applyMsg.Command.(Op)
 			identifier := op.ID
 			index := applyMsg.CommandIndex
 
 			// 避免重复执行同一个op
-			if kv.ITable.Executed(identifier) {
-				reply := kv.ITable.GetCacheReply(op.ID.ClerkID)
+			if ok,reply:=kv.ITable.Executed(identifier);ok {
 				kv.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.Replay)
 				continue
 			}
@@ -160,11 +155,11 @@ func (kv *KVServer) applier() {
 			// 执行对应的命令
 			switch op.Kind {
 			case "Get":
-				reply = kv.Database.Get(op.Key)
+				reply = kv.Database.Get(op.Key.(string))
 			case "Put":
-				reply = kv.Database.Put(op.Key, op.Value)
+				reply = kv.Database.Put(op.Key.(string), op.Value.(string))
 			case "Append":
-				reply = kv.Database.Append(op.Key, op.Value)
+				reply = kv.Database.Append(op.Key.(string), op.Value.(string))
 			}
 
 			// 更新clerkID对应的Client的下一个待执行Op的Seq
@@ -182,7 +177,7 @@ func (kv *KVServer) applier() {
 		// 一定要在安装完快照之后才拍摄新的快照
 		// 否则若在安装快照之前拍摄新的快照：当raft宕机恢复之后判断raft.statesize足够大了，此时数据库的状态为空！
 		if kv.maxraftstate > -1 && kv.maxraftstate <= kv.rf.RaftStateSize() {
-			Debug(DServer, "[*] S%d SNAPSHOT.", kv.me)
+			// Debug(DServer, "[*] S%d SNAPSHOT.", kv.me)
 			kv.rf.Snapshot(applyMsg.CommandIndex, kv.Snapshot())
 		}
 	}
@@ -200,7 +195,7 @@ func (kv *KVServer) Snapshot() []byte {
 		log.Fatalf("S%d fail to encode ITable, err:%v\n", kv.me, err)
 	}
 
-	// fmt.Printf("[*] C%d, snapshot:\ndatabase:%v\nitable:%v\n", kv.me, kv.Database, kv.ITable.SeqTable)
+	// fmt.Printf("[*] C%d, snapshot:\ndatabase:%v\nitable:%v\n", kv.me, kv.DB, kv.ITable.SeqTable)
 	return snapshot.Bytes()
 }
 
@@ -217,5 +212,5 @@ func (kv *KVServer) InstallSnapshot(snapshot []byte) {
 		log.Fatalf("S%d fail to decode ITable, err:%v\n", kv.me, err)
 	}
 
-	// fmt.Printf("[*] C%d, install snapshot:\ndatabase:%v\nitable:%v\n", kv.me, kv.Database, kv.ITable.SeqTable)
+	// fmt.Printf("[*] C%d, install snapshot:\ndatabase:%v\nitable:%v\n", kv.me, kv.DB, kv.ITable.SeqTable)
 }

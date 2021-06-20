@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"log"
 	"sync/atomic"
 	"unsafe"
 )
@@ -49,11 +50,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	)
 	reply.Term = Max(term, currentTerm) // 响应的term一定是较大值
 
-	Debug(DAppend, "[%d] R%d RECEIVE<- R%d AE,T:%d HAS:%v PLI:%d PLT:%d, LLI:%d, LLT:%d LEN:%d", currentTerm, me, leaderID, term, args.HasSnapshot, args.PrevLogIndex, args.PrevLogTerm, args.LastIncludeIndex, args.LastIncludeTerm, len(args.Log))
+	Debug(DAppend, "[%d] R%d#%d RECEIVE<- R%d AE,T:%d HAS:%v PLI:%d PLT:%d, LLI:%d, LLT:%d LEN:%d", currentTerm, me, rf.gid, leaderID, term, args.HasSnapshot, args.PrevLogIndex, args.PrevLogTerm, args.LastIncludeIndex, args.LastIncludeTerm, len(args.Log))
 
 	if term < currentTerm {
 		reply.Success = false
-		Debug(DAppend, "[%d] R%d REFUSE <- R%d, LOWER TERM.", currentTerm, me, leaderID)
+		Debug(DAppend, "[%d] R%d#%d REFUSE <- R%d, LOWER TERM.", currentTerm, me, rf.gid, leaderID)
 		reply.Valid = true
 		return
 	}
@@ -74,8 +75,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		image = *i
 
 		currentTerm = image.CurrentTerm
-		Debug(DAppend, "[%d] R%d CONVERT FOLLOWER <- R%d.", term, me, leaderID)
+		Debug(DAppend, "[%d] R%d#%d CONVERT FOLLOWER <- R%d.", term, me, rf.gid, leaderID)
 		i.resetTimer() // 重置计时器
+		if rf.gid != 0 {
+			log.Printf("[%d] R%d#%d RECEIVE AERPC, CONVERT FOLLOWER. <- R%d.", term, me, rf.gid, leaderID)
+		}
 	})
 
 	// server的状态已经发生了改变
@@ -113,7 +117,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if prevLogIndex < 0 { // FOLLOWER日志中不存在prevLogIndex执行的日志条目
 			offset := -prevLogIndex - 1  // FOLLOWER日志的第一个条目在RPC日志中的位置
 			if offset >= len(args.Log) { // RPC中所有的日志都是过时的
-				Debug(DAppend, "[%d] R%d REFUSE <- R%d, OLD LOG", currentTerm, me, leaderID)
+				Debug(DAppend, "[%d] R%d#%d REFUSE <- R%d, OLD LOG", currentTerm, me, rf.gid, leaderID)
 				reply.Success = true
 				return
 			}
@@ -127,7 +131,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				reply.ConflictIndex = len(rf.Log)
 				reply.ConflictTerm = -1
 				reply.Success = false
-				Debug(DAppend, "[%d] R%d REFUSE <- R%d, CONFLICT", currentTerm, me, leaderID)
+				Debug(DAppend, "[%d] R%d#%d REFUSE <- R%d, CONFLICT", currentTerm, me, rf.gid, leaderID)
 				return
 			}
 
@@ -144,7 +148,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				// ConflictIndex的绝对索引
 				reply.ConflictIndex += rf.RWLog.SnapshotIndex
 
-				Debug(DAppend, "[%d] R%d REFUSE <- R%d, CONFLICT", currentTerm, me, leaderID)
+				Debug(DAppend, "[%d] R%d#%d REFUSE <- R%d, CONFLICT", currentTerm, me, rf.gid, leaderID)
 				return
 			}
 			i, j = prevLogIndex+1, 0
@@ -157,7 +161,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 			lastIncludeIndex = -lastIncludeIndex   // FOLLOWER日志第一个条目在RPC日志的位置
 			if lastIncludeIndex >= len(args.Log) { // 所有的日志条目都是过时的
-				Debug(DAppend, "[%d] R%d REFUSE <- R%d, OLD LOG", currentTerm, me, leaderID)
+				Debug(DAppend, "[%d] R%d#%d REFUSE <- R%d, OLD LOG", currentTerm, me, rf.gid, leaderID)
 				reply.Success = true
 				return
 			}
@@ -210,8 +214,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// 一边去提交就好了
 			go func() {
 				// 通知commit协程提交日志
-				Debug(DCommit, "[%d] R%d UPDATE  CI:%d <-R%d", currentTerm, me, newCommitIndex, leaderID)
-
+				Debug(DCommit, "[%d] R%d#%d UPDATE  CI:%d <-R%d", currentTerm, me, rf.gid, newCommitIndex, leaderID)
 				rf.commitCh <- newCommitIndex
 			}()
 		}
@@ -223,15 +226,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}()
 
 	for ; i < len(rf.Log) && j < len(args.Log); i, j = i+1, j+1 {
-		// 日志term不匹配，或者term匹配但是一个是快照，一个不是也不行
-		if rf.Log[i].Term != args.Log[j].Term || rf.Log[i].CommandValid == args.Log[j].SnapshotValid {
+		// 日志term不匹配，或者term匹配但是一个是快照，一个不是也不行;
+		// 如果两个都是占位符或是no-op无所谓。
+		if rf.Log[i].Term != args.Log[j].Term || (rf.Log[i].CommandValid == args.Log[j].SnapshotValid && rf.Log[i].CommandValid) {
 			break
 		}
 	}
 
 	// 日志添加完成
 	if j >= len(args.Log) {
-		Debug(DAppend, "[%d] R%d APPEND <- R%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
+		Debug(DAppend, "[%d] R%d#%d APPEND <- R%d, LEN:%d", currentTerm, me, rf.gid, leaderID, len(args.Log))
 		return
 	}
 
@@ -240,13 +244,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		log := make([]Entry, len(rf.Log[:i]))
 		copy(log, rf.Log[:i])
 		rf.Log = log
-		Debug(DAppend, "[%d] R%d DROP <- R%d, CLI:%d-%d, HAS:%v", currentTerm, me, leaderID, i, j, args.HasSnapshot)
+		Debug(DAppend, "[%d] R%d#%d DROP <- R%d, CLI:%d-%d, HAS:%v", currentTerm, me, rf.gid, leaderID, i, j, args.HasSnapshot)
 	}
 
 	// 追加剩余日志
 	rf.Log = append(rf.Log, args.Log[j:]...)
 
-	Debug(DAppend, "[%d] R%d APPEND <- R%d, LEN:%d", currentTerm, me, leaderID, len(args.Log))
+	Debug(DAppend, "[%d] R%d#%d APPEND <- R%d, LEN:%d", currentTerm, me, rf.gid, leaderID, len(args.Log))
 }
 
 // Aerpc 向标号为peerIndex的peer发送AE RPC，并处理后续响应
@@ -255,7 +259,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // matchIndex	发送RPC时peer的matchIndex值
 // args			RPC参数
 func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEntriesArgs) {
-	Debug(DAppend, "[%d] R%d AE RPC -> R%d", image.CurrentTerm, image.me, peerIndex)
+	Debug(DAppend, "[%d] R%d#%d AE RPC -> R%d", image.CurrentTerm, image.me, image.gid, peerIndex)
+
+	if image.gid != 0 {
+		log.Printf("[%d] R%d#%d AE RPC -> R%d\n", image.CurrentTerm, image.me, image.gid, peerIndex)
+	}
 
 	reply := new(AppendEntriesReply)
 	image.peers[peerIndex].Call("Raft.AppendEntries", args, reply)
@@ -264,7 +272,7 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 	if image.Done() || !reply.Valid {
 		return
 	}
-	Debug(DAppend, "[%d] R%d AE <-REPLY R%d, V:%v S:%v CLI:%d, CLT:%d", image.CurrentTerm, image.me, peerIndex, reply.Valid, reply.Success, reply.ConflictIndex, reply.ConflictTerm)
+	Debug(DAppend, "[%d] R%d#%d AE <- REPLY R%d, V:%v S:%v CLI:%d, CLT:%d", image.CurrentTerm, image.me, image.gid, peerIndex, reply.Valid, reply.Success, reply.ConflictIndex, reply.ConflictTerm)
 
 	// server应该转为FOLLOWER，但不用重置计时器
 	if reply.Term > image.CurrentTerm {
@@ -274,7 +282,7 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 			i.State = FOLLOWER
 			i.CurrentTerm = reply.Term
 			i.VotedFor = -1
-			Debug(DTimer, "[%d] R%d CONVERT FOLLOWER <- R%d NEW TERM.", i.CurrentTerm, i.me, peerIndex)
+			Debug(DTimer, "[%d] R%d#%d CONVERT FOLLOWER <- R%d NEW TERM.", i.CurrentTerm, i.me, i.gid, peerIndex)
 
 			// 使旧的Image实例失效
 			close(i.done)
@@ -331,10 +339,10 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 	// 采用CAS的方式，保证并发情况下nextIndex、matchIndex的正确性
 	if atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.nextIndex[peerIndex])), int64(nextIndex), int64(newNextIndex)) &&
 		atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.matchIndex[peerIndex])), int64(matchIndex), int64(newMatchIndex)) {
-		Debug(DAppend, "[%d] R%d UPDATE M&N -> R%d, MI:%d, NI:%d", image.CurrentTerm, image.me, peerIndex, newMatchIndex, newNextIndex)
+		Debug(DAppend, "[%d] R%d#%d UPDATE M&N -> R%d, MI:%d, NI:%d", image.CurrentTerm, image.me, image.gid, peerIndex, newMatchIndex, newNextIndex)
 
 		// 通知LEADER提交日志
-		if newMatchIndex > matchIndex {
+		if reply.Success {
 			image.Raft.updateCommitIndex(image, newMatchIndex)
 		}
 	}
@@ -376,7 +384,7 @@ loop:
 
 		// 通知applier协程提交日志，放在协程内执行可以让calculateCommitIndex尽快返回
 		go func() {
-			Debug(DCommit, "[%d] R%d UPDATE CI:%d", rf.CurrentTerm, rf.me, matchIndex)
+			Debug(DCommit, "[%d] R%d#%d UPDATE CI:%d", rf.CurrentTerm, rf.me, rf.gid, matchIndex)
 			rf.commitCh <- matchIndex
 		}()
 	}
@@ -385,7 +393,6 @@ loop:
 func (rf *Raft) SendAppendEntries() {
 	image := *rf.Image
 
-	Debug(DAppend, "[%d] R%d SEND AE RPC.", rf.CurrentTerm, rf.me)
 	rf.RWLog.mu.RLock()
 	defer rf.RWLog.mu.RUnlock()
 	for server := range rf.peers {
