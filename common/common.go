@@ -27,8 +27,7 @@ type OpReply struct {
 // 记录每个Op，及其执行结果
 // 但server执行完Op之后，关闭s以通知等待当前Op的Client
 type SignalWithOpReply struct {
-	s    chan signal
-	wait int // 等待s的clerk协程数目
+	s chan signal
 	OpReply
 }
 
@@ -111,6 +110,17 @@ func (or OpReplys) SetAndBroadcast(i Index, op Op, re interface{}, awake bool) {
 	ret.op = op
 	ret.reply = re // 设置op的执行结果
 	close(ret.s)   // 唤醒等待协程
+}
+
+func (or OpReplys) BroadcastAll(end Index) {
+	or.mu.Lock()
+	defer or.mu.Unlock()
+	for i, reply := range or.table {
+		if i <= end {
+			close(reply.s)
+			delete(or.table, i)
+		}
+	}
 }
 
 func (or OpReplys) Delete(i Index) {
