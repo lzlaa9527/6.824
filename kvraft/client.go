@@ -69,8 +69,6 @@ func (ck *Clerk) Append(key string, value string) {
 
 func (ck *Clerk) doRPC(method string, arg interface{}, reply interface{}) interface{} {
 
-	co := 0
-
 	replyType := reflect.TypeOf(reply).Elem()
 	for {
 		Debug(DClient, "[*] C%d CALL %s TO S%d, SEQ:%d", ck.ClerkID, method, ck.leaderID, ck.OpSeq-1)
@@ -91,25 +89,24 @@ func (ck *Clerk) doRPC(method string, arg interface{}, reply interface{}) interf
 		// Call返回false或者定时器到期，表明请求超时
 		if !ok {
 			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
-			co++
 			Debug(DClient, "[*] C%d CALL %s TIMEOUT, SEQ: %d", ck.ClerkID, method, ck.OpSeq-1)
 		} else {
-			// Debug(DClient, "[*] C%d RECEIVE %s REPLY, SEQ: %d; %+v", ck.ClerkID, method, ck.OpSeq-1, reply)
+			Debug(DClient, "[*] C%d RECEIVE %s REPLY, SEQ: %d; %+v", ck.ClerkID, method, ck.OpSeq-1, reply)
 
 			switch reflect.ValueOf(reply).Elem().FieldByName("Err").Interface().(Err) {
 			case OK, ErrNoKey:
 				Debug(DClient, "[*] S%d %s DONE.", ck.leaderID, method)
 				return reply
 			case ErrWrongLeader:
-				// Debug(DClient, "[*] S%d WRONG LEADER.", ck.leaderID)
 				ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
-				co++
+				Debug(DClient, "[*] S%d WRONG LEADER. LI: %d, SERV:%d", ck.leaderID, ck.leaderID, len(ck.servers))
+
 			}
 		}
 
 		// 如果所有的server都不是leader，那就等待300ms
-		if co%len(ck.servers) == 0 {
-			time.Sleep(raft.HEARTBEAT * 3)
+		if ck.leaderID%len(ck.servers) == 0 {
+			time.Sleep(raft.HEARTBEAT)
 		}
 	}
 }

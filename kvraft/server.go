@@ -40,6 +40,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	// Debug(DServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
 
+	if ok, ret := kv.ITable.Executed(op.ID); ok {
+		reply.Err = ret.(GetReply).Err
+		reply.Value = ret.(GetReply).Value
+		return
+	}
+
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -67,6 +73,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			ClerkID: args.ClerkID,
 			Seq:     args.OpSeq,
 		},
+	}
+
+	if ok, ret := kv.ITable.Executed(op.ID); ok {
+		reply.Err = ret.(PutAppendReply).Err
+		return
 	}
 
 	// Debug(DServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
@@ -135,7 +146,6 @@ func (kv *KVServer) applier() {
 		}
 
 		if applyMsg.SnapshotValid { // 应用snapshot
-			// Debug(DServer, "[*] S%d INSTALL SNAPSHOT. IN:%d, TERM:%d", kv.me, applyMsg.SnapshotIndex, applyMsg.SnapshotTerm)
 
 			kv.InstallSnapshot(applyMsg.Snapshot)
 		} else { // 应用普通的日志条目
@@ -191,8 +201,13 @@ func (kv *KVServer) Snapshot() []byte {
 		log.Fatalf("S%d fail to encode database, err:%v\n", kv.me, err)
 	}
 
-	if err := e.Encode(kv.ITable); err != nil {
-		log.Fatalf("S%d fail to encode ITable, err:%v\n", kv.me, err)
+	seqTable, replyTable := kv.ITable.Export(true)
+	if err := e.Encode(seqTable); err != nil {
+		log.Fatalf("S%d fail to encode SeqTable, err:%v\n", kv.me, err)
+	}
+
+	if err := e.Encode(replyTable); err != nil {
+		log.Fatalf("S%d fail to encode ReplyTable, err:%v\n", kv.me, err)
 	}
 
 	// fmt.Printf("[*] C%d, snapshot:\ndatabase:%v\nitable:%v\n", kv.me, kv.DB, kv.ITable.SeqTable)
@@ -208,9 +223,18 @@ func (kv *KVServer) InstallSnapshot(snapshot []byte) {
 		log.Fatalf("S%d fail to decode database, err:%v\n", kv.me, err)
 	}
 
-	if err := d.Decode(&kv.ITable); err != nil {
-		log.Fatalf("S%d fail to decode ITable, err:%v\n", kv.me, err)
+	seqTable := make(map[int]int) // 记录每一个clerk的待提交的Op Sequence number
+	replyTable := make(map[int]interface{})
+	if err := d.Decode(&seqTable); err != nil {
+		log.Fatalf("S%d fail to decode seqTable, err:%v\n", kv.me, err)
+	}
+	if err := d.Decode(&replyTable); err != nil {
+		log.Fatalf("S%d fail to decode replyTable, err:%v\n", kv.me, err)
 	}
 
-	// fmt.Printf("[*] C%d, install snapshot:\ndatabase:%v\nitable:%v\n", kv.me, kv.DB, kv.ITable.SeqTable)
+	kv.ITable.Reset()
+	// 安装快照前先清空原有的内容
+	for id, seq := range seqTable {
+		kv.ITable.UpdateIdentifier(id, seq, replyTable[id])
+	}
 }
