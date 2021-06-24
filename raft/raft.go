@@ -219,7 +219,6 @@ func (rf *Raft) ticker() {
 		case <-rf.dead:
 			Debug(dKill, "[%d] R%d BE KILLED", rf.CurrentTerm, rf.me)
 			close(rf.done) // 通知所有的工作协程退出
-			close(rf.applyCh)
 			rf.timer.Stop()
 			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
 			return
@@ -257,17 +256,6 @@ func (rf *Raft) ticker() {
 		case CANDIDATE:
 			rf.sendRequestVote()
 		case LEADER:
-			// leader 任期开始时添加一个空的日志条目 no-op 条目
-			// if rf.Log[len(rf.Log)-1].Term != rf.CurrentTerm {
-			// 	index := len(rf.Log)
-			//
-			// 	rf.Log = append(rf.Log, Entry{
-			// 		ApplyMsg: ApplyMsg{Command: nil, CommandIndex: index},
-			// 		Term:     rf.CurrentTerm,
-			// 	})
-			// 	Debug(dAppend, "[%d] R%d Append Entry. IN:%d, TE:%d", rf.CurrentTerm, rf.me, index, rf.Log[index].Term)
-			// }
-			// rf.timer.Reset(HEARTBEAT)
 			rf.SendAppendEntries()
 		}
 	}

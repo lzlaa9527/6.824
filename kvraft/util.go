@@ -12,13 +12,13 @@ import (
 type logTopic string
 
 const (
-	dClient logTopic = "CLNT" // 客户端
-	dServer logTopic = "SEVE" // 服务端
-	dError  logTopic = "ERRO"
+	DClient logTopic = "CLNT" // 客户端
+	DServer logTopic = "SEVE" // 服务端
+	DError  logTopic = "ERRO"
 )
 
 var debugStart time.Time
-var debug = 1
+var debug = 0
 
 // Retrieve the verbosity level from an environment variable
 func getVerbosity() int {

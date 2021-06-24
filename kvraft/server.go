@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	. "6.824/common"
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
@@ -37,24 +38,21 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			Seq:     args.OpSeq,
 		},
 	}
-	Debug(dServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
+	// Debug(DServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
 
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-
-		Debug(dServer, "[*] S%d NOT LEADER.", kv.me)
 		return
 	}
-	Debug(dServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
+	// Debug(DServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
 
-	ret, err := kv.waitAndMatch(index, op)
-	Debug(dServer, "[*] S%d GET REPLY, SEQ: %d.", kv.me, index)
-	if ret != nil {
-		reply.Err = ret.(*GetReply).Err
-		reply.Value = ret.(*GetReply).Value
-	} else {
+	ret, err := kv.WaitAndMatch(index, op)
+	if ret == nil {
 		reply.Err = err
+	} else {
+		reply.Err = ret.(GetReply).Err
+		reply.Value = ret.(GetReply).Value
 	}
 }
 
@@ -71,47 +69,26 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		},
 	}
 
-	Debug(dServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
+	// Debug(DServer, "[*] S%d RECEIVE OP:%+v", kv.me, op)
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		Debug(dServer, "[*] S%d NOT LEADER.", kv.me)
 		return
 	}
-	Debug(dServer, "[*] S%d SEND RAFT, WAIT: %d.", kv.me, index)
 
-	ret, err := kv.waitAndMatch(index, op)
-	Debug(dServer, "[*] S%d GET REPLY, SEQ: %d.", kv.me, index)
-	if ret != nil {
-		reply.Err = ret.(*PutAppendReply).Err
-	} else {
+	ret, err := kv.WaitAndMatch(index, op)
+	if ret == nil {
 		reply.Err = err
+	} else {
+		reply.Err = ret.(PutAppendReply).Err
 	}
-}
-
-// clerk协程等待reqOp的完成。
-// 因为存在raft leadership的转变，多个clerk可能会等待同一个index的op；当server执行完
-// index对应的op后，会通知所有等待的clerk协程；clerk协程会根据result.op == reqOp判断
-// 完成的op是不是自己提交的op；如果不是就表明发生了leadership的转变
-//
-func (kv *KVServer) waitAndMatch(index int, reqOp Op) (interface{}, Err) {
-
-	result := kv.OpReplys.Wait(Index(index))
-	resOp := result.op // raft所提交日志中的ApplyMsg
-
-	// leadership 发生变更，或者原先提交的请求被覆盖时index处的 resOp != reqOp
-	if resOp != reqOp {
-		return nil, ErrWrongLeader
-	}
-	kv.OpReplys.Delete(Index(index)) // 为了节约内存及时删除缓存
-	return result.reply, ""
 }
 
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	kv.OpReplys.Destory() // 通知尚未退出的clerk退出
-	close(kv.applyCh)     // 通知applier协程退出
+	Debug(DServer, "S%d Stop!", kv.me)
 }
 
 func (kv *KVServer) killed() bool {
@@ -122,7 +99,10 @@ func (kv *KVServer) killed() bool {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
+	// 将可能作为interface{}取值的字段，进行注册
 	labgob.Register(Op{})
+	labgob.Register(PutAppendReply{})
+	labgob.Register(GetReply{})
 
 	kv := new(KVServer)
 	kv.me = me
@@ -134,19 +114,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.ITable = ITable{
-		seqTable:   make(map[int]int),
-		replyTable: make(map[int]interface{}),
-	}
-	kv.OpReplys = OpReplys{
-		table: make(map[Index]*SignalWithOpReply),
-		mu:    new(sync.Mutex),
-	}
+	kv.ITable = NewITable()
+	kv.OpReplys = NewOpReplays()
 	kv.Database = make(Database)
 
 	go kv.applier()
 
-	Debug(dServer, "[*] S%d start.", me)
+	Debug(DServer, "[*] S%d start.", me)
 	return kv
 }
 
@@ -160,27 +134,19 @@ func (kv *KVServer) applier() {
 			return
 		}
 
-		// 通知raft进行snapshot
-		if kv.maxraftstate <= kv.rf.RaftStateSize() {
-			var snap []byte
-			kv.rf.Snapshot(applyMsg.CommandIndex, snap)
-		}
-
-		Debug(dServer, "[*] S%d RECEIVE MSG:%+v", kv.me, applyMsg)
-
 		if applyMsg.SnapshotValid { // 应用snapshot
+			// Debug(DServer, "[*] S%d INSTALL SNAPSHOT. IN:%d, TERM:%d", kv.me, applyMsg.SnapshotIndex, applyMsg.SnapshotTerm)
+
 			kv.InstallSnapshot(applyMsg.Snapshot)
 		} else { // 应用普通的日志条目
-			if !applyMsg.CommandValid {
-				continue
-			}
+			// Debug(DServer, "[*] S%d RECEIVE LOG ENTRY. IN:%d, CMD:%+v", kv.me, applyMsg.CommandIndex, applyMsg.Command)
+
 			op := applyMsg.Command.(Op)
 			identifier := op.ID
 			index := applyMsg.CommandIndex
 
 			// 避免重复执行同一个op
-			if kv.ITable.Executed(identifier) {
-				reply := kv.ITable.GetCacheReply(op.ID.ClerkID)
+			if ok,reply:=kv.ITable.Executed(identifier);ok {
 				kv.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.Replay)
 				continue
 			}
@@ -189,11 +155,11 @@ func (kv *KVServer) applier() {
 			// 执行对应的命令
 			switch op.Kind {
 			case "Get":
-				reply = kv.Database.Get(op.Key)
+				reply = kv.Database.Get(op.Key.(string))
 			case "Put":
-				reply = kv.Database.Put(op.Key, op.Value)
+				reply = kv.Database.Put(op.Key.(string), op.Value.(string))
 			case "Append":
-				reply = kv.Database.Append(op.Key, op.Value)
+				reply = kv.Database.Append(op.Key.(string), op.Value.(string))
 			}
 
 			// 更新clerkID对应的Client的下一个待执行Op的Seq
@@ -205,9 +171,15 @@ func (kv *KVServer) applier() {
 			//
 			// 重启前提交的op需要被重放，但是不存在clerk协程等待server重启前提交的op。
 			kv.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.Replay)
-			Debug(dServer, "[*] S%d HANDLE OP:%+v, REPLY:%+v", kv.me, op, reply)
 		}
 
+		// 通知raft进行snapshot
+		// 一定要在安装完快照之后才拍摄新的快照
+		// 否则若在安装快照之前拍摄新的快照：当raft宕机恢复之后判断raft.statesize足够大了，此时数据库的状态为空！
+		if kv.maxraftstate > -1 && kv.maxraftstate <= kv.rf.RaftStateSize() {
+			// Debug(DServer, "[*] S%d SNAPSHOT.", kv.me)
+			kv.rf.Snapshot(applyMsg.CommandIndex, kv.Snapshot())
+		}
 	}
 }
 
@@ -219,10 +191,11 @@ func (kv *KVServer) Snapshot() []byte {
 		log.Fatalf("S%d fail to encode database, err:%v\n", kv.me, err)
 	}
 
-	if err := e.Encode(&kv.ITable); err != nil {
+	if err := e.Encode(kv.ITable); err != nil {
 		log.Fatalf("S%d fail to encode ITable, err:%v\n", kv.me, err)
 	}
 
+	// fmt.Printf("[*] C%d, snapshot:\ndatabase:%v\nitable:%v\n", kv.me, kv.DB, kv.ITable.SeqTable)
 	return snapshot.Bytes()
 }
 
@@ -238,4 +211,6 @@ func (kv *KVServer) InstallSnapshot(snapshot []byte) {
 	if err := d.Decode(&kv.ITable); err != nil {
 		log.Fatalf("S%d fail to decode ITable, err:%v\n", kv.me, err)
 	}
+
+	// fmt.Printf("[*] C%d, install snapshot:\ndatabase:%v\nitable:%v\n", kv.me, kv.DB, kv.ITable.SeqTable)
 }
