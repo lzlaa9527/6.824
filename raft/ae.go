@@ -137,7 +137,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				reply.ConflictTerm = rf.Log[prevLogIndex].Term
 
 				// 找到首个term为ConflictTerm的ConflictIndex
-				for reply.ConflictIndex = prevLogIndex; rf.Log[reply.ConflictIndex].Term == reply.ConflictTerm; reply.ConflictIndex-- {
+				for reply.ConflictIndex = prevLogIndex; reply.ConflictIndex >= 0 && rf.Log[reply.ConflictIndex].Term == reply.ConflictTerm; reply.ConflictIndex-- {
 				}
 
 				reply.ConflictIndex++
@@ -333,7 +333,7 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 		Debug(dAppend, "[%d] R%d UPDATE M&N -> R%d, MI:%d, NI:%d", image.CurrentTerm, image.me, peerIndex, newMatchIndex, newNextIndex)
 
 		// 通知LEADER提交日志
-		if reply.Success {
+		if newMatchIndex > matchIndex {
 			image.Raft.updateCommitIndex(image, newMatchIndex)
 		}
 	}
