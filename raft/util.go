@@ -28,7 +28,7 @@ const (
 )
 
 var debugStart time.Time
-var debug = 1
+var debug = 0
 
 // Retrieve the verbosity level from an environment variable
 func getVerbosity() int {

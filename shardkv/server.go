@@ -57,6 +57,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		reply.Err = ErrWrongLeader
+		return
 	}
 
 	// 当前数据尚未迁移完成
@@ -112,6 +113,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		reply.Err = ErrWrongLeader
+		return
 	}
 
 	// 当前数据尚未迁移完成
@@ -171,13 +173,13 @@ func (kv *ShardKV) Pull(args *PullArgs, reply *PullReply) {
 
 		reply.Err = ret.(PullReply).Err
 		reply.DB = ret.(PullReply).DB
-
 		reply.SeqTable, reply.ReplyTable = kv.ITable.Export(false)
 		return
 	}
 
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		reply.Err = ErrWrongLeader
+		return
 	}
 
 	curCfgnum := atomic.LoadInt64((*int64)(unsafe.Pointer(&kv.config.Num)))
@@ -202,6 +204,7 @@ func (kv *ShardKV) Pull(args *PullArgs, reply *PullReply) {
 		reply.DB = ret.(PullReply).DB
 		reply.SeqTable, reply.ReplyTable = kv.ITable.Export(false)
 	}
+	Debug(DServer, "[*] S%d#%d&%d `Pull` FROM:%d#%d REPLY:%+v", kv.me, kv.gid, curCfgnum, args.FromGID, args.Cfgnum, reply)
 }
 
 func (kv *ShardKV) Kill() {
@@ -283,6 +286,9 @@ func (kv *ShardKV) applier() {
 			Debug(DServer, "[*] S%d#%d&%d INSTALL SNAPSHOT. IN:%d, TERM:%d", kv.me, kv.gid, kv.config.Num, applyMsg.SnapshotIndex, applyMsg.SnapshotTerm)
 			kv.InstallSnapshot(applyMsg.Snapshot)
 
+			// 安装快照之后，SnapshotIndex之前的Op都不会被执行，要手动唤醒那些等待的工作协程。
+			kv.OpReplys.BroadcastAll(Index(applyMsg.SnapshotIndex))
+
 		} else { // 应用普通的日志条目
 			op := applyMsg.Command.(Op)
 			identifier := op.ID
@@ -315,21 +321,6 @@ func (kv *ShardKV) applier() {
 								delete(kv.Database, k)
 							}
 						}
-					}
-
-					// 数据迁移时还需要同步不同备份组的ITable；
-					// 避免同一个请求在不同的备份组，被重复执行。
-					// 这里只同步来自Clerk的请求，不同步来自server的请求。
-					pullItable := NewITable()
-
-					for k := range kv.ITable.SeqTable {
-						// ClerkID的第63位为1，表明该请求来自于server而不是来自于clerk
-						// 因此不需要进行同步。
-						if k>>62 == 1 {
-							continue
-						}
-						pullItable.SeqTable[k] = kv.ITable.SeqTable[k]
-						pullItable.ReplyTable[k] = kv.ITable.ReplyTable[k]
 					}
 					reply = PullReply{DB: pullDB, Err: OK}
 				}
@@ -511,6 +502,7 @@ func (kv *ShardKV) InstallSnapshot(snapshot []byte) {
 		log.Fatalf("S%d fail to decode tasks, err:%v\n", kv.me, err)
 	}
 
+	kv.ITable.Reset()
 	// 安装快照前先清空原有的内容
 	for id, seq := range seqTable {
 		kv.ITable.UpdateIdentifier(id, seq, replyTable[id])
@@ -583,8 +575,6 @@ func (kv *ShardKV) poll() {
 			Debug(DServer, "S%d#%d&%d SEND RECONFIG: %+v", kv.me, kv.gid, kv.config.Num, reconfigArg)
 
 			// 等待Raft提交ReConfig请求并执行。
-			// 如果ReConfig请求执行成功，说明ReConfig请求完成
-			// 再来一遍，否则重新更新config。
 			kv.WaitAndMatch(index, op)
 		} else {
 			tasks := kv.pullTasks.Export()
@@ -630,6 +620,7 @@ func (kv *ShardKV) poll() {
 						return
 					}
 
+					Debug(DServer, "[*] S%d#%d&%d CALL `ShardKV.Merge`: %+v", kv.me, kv.gid, kv.config.Num, op)
 					index, _, isLeader := kv.rf.Start(op)
 					if !isLeader {
 						return
@@ -671,11 +662,11 @@ func (kv *ShardKV) pull(args *PullArgs, servers []string) *PullReply {
 
 		select {
 		case <-retCh:
+			if reply.Err == OK {
+				return reply
+			}
 		case <-time.After(time.Millisecond * 30):
-		}
-
-		if reply.Err == OK {
-			return reply
+			return nil
 		}
 	}
 	return nil
