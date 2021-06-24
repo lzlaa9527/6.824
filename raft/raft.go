@@ -220,7 +220,6 @@ func (rf *Raft) ticker() {
 		case <-rf.dead:
 			Debug(dKill, "[%d] R%d BE KILLED", rf.CurrentTerm, rf.me)
 			close(rf.done) // 通知所有的工作协程退出
-			close(rf.applyCh)
 			rf.timer.Stop()
 			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
 			return

@@ -74,11 +74,23 @@ func (rf *Raft) applier() {
 				rf.RWLog.mu.RUnlock()
 				continue
 			}
+
+			if rf.lastApplied-snapshotIndex >= len(rf.Log) {
+				rf.RWLog.mu.RUnlock()
+				break
+			}
+
 			entry := rf.Log[rf.lastApplied-snapshotIndex]
+			rf.lastApplied++
 			rf.RWLog.mu.RUnlock()
+
+			// 过滤掉占位符以及no-op日志条目
+			if !entry.CommandValid && !entry.SnapshotValid {
+				continue
+			}
+
 			Debug(dCommit, "[%d] R%d APPLY LA:%d, SI:%d", rf.CurrentTerm, rf.me, rf.lastApplied, snapshotIndex)
 			rf.applyCh <- entry.ApplyMsg
-			rf.lastApplied++
 		}
 	}
 }
