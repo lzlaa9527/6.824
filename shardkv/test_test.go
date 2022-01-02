@@ -24,7 +24,7 @@ func check(t *testing.T, ck *Clerk, key string, value string) {
 // test static 2-way sharding, without shard movement.
 //
 func TestStaticShards(t *testing.T) {
-	fmt.Printf("Test: static Shards ...\n")
+	fmt.Printf("Test: static migrating ...\n")
 
 	cfg := make_config(t, 3, false, -1)
 	defer cfg.cleanup()
@@ -38,7 +38,7 @@ func TestStaticShards(t *testing.T) {
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple Shards
+		ka[i] = strconv.Itoa(i) // ensure multiple migrating
 		va[i] = randstring(20)
 		ck.Put(ka[i], va[i])
 	}
@@ -108,7 +108,7 @@ func TestJoinLeave(t *testing.T) {
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple Shards
+		ka[i] = strconv.Itoa(i) // ensure multiple migrating
 		va[i] = randstring(5)
 		ck.Put(ka[i], va[i])
 	}
@@ -134,7 +134,7 @@ func TestJoinLeave(t *testing.T) {
 		va[i] += x
 	}
 
-	// allow time for Shards to transfer.
+	// allow time for migrating to transfer.
 	time.Sleep(1 * time.Second)
 
 	cfg.checklogs()
@@ -161,7 +161,7 @@ func TestSnapshot(t *testing.T) {
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple Shards
+		ka[i] = strconv.Itoa(i) // ensure multiple migrating
 		va[i] = randstring(20)
 		ck.Put(ka[i], va[i])
 	}
@@ -230,7 +230,7 @@ func TestMissChange(t *testing.T) {
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple Shards
+		ka[i] = strconv.Itoa(i) // ensure multiple migrating
 		va[i] = randstring(20)
 		ck.Put(ka[i], va[i])
 	}
@@ -326,7 +326,7 @@ func TestConcurrent1(t *testing.T) {
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple Shards
+		ka[i] = strconv.Itoa(i) // ensure multiple migrating
 		va[i] = randstring(5)
 		ck.Put(ka[i], va[i])
 	}
@@ -409,7 +409,7 @@ func TestConcurrent2(t *testing.T) {
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple Shards
+		ka[i] = strconv.Itoa(i) // ensure multiple migrating
 		va[i] = randstring(1)
 		ck.Put(ka[i], va[i])
 	}
@@ -546,7 +546,7 @@ func TestUnreliable1(t *testing.T) {
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple Shards
+		ka[i] = strconv.Itoa(i) // ensure multiple migrating
 		va[i] = randstring(5)
 		ck.Put(ka[i], va[i])
 	}
@@ -588,7 +588,7 @@ func TestUnreliable2(t *testing.T) {
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple Shards
+		ka[i] = strconv.Itoa(i) // ensure multiple migrating
 		va[i] = randstring(5)
 		ck.Put(ka[i], va[i])
 	}
@@ -655,7 +655,7 @@ func TestUnreliable3(t *testing.T) {
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple Shards
+		ka[i] = strconv.Itoa(i) // ensure multiple migrating
 		va[i] = randstring(5)
 		start := int64(time.Since(begin))
 		ck.Put(ka[i], va[i])
@@ -744,7 +744,7 @@ func TestUnreliable3(t *testing.T) {
 
 //
 // optional test to see whether servers are deleting
-// Shards for which they are no longer responsible.
+// migrating for which they are no longer responsible.
 //
 func TestChallenge1Delete(t *testing.T) {
 	fmt.Printf("Test: shard deletion (challenge 1) ...\n")
@@ -829,7 +829,7 @@ func TestChallenge1Delete(t *testing.T) {
 
 //
 // optional test to see whether servers can handle
-// Shards that are not affected by a config change
+// migrating that are not affected by a config change
 // while the config change is underway
 //
 func TestChallenge2Unaffected(t *testing.T) {
@@ -843,12 +843,12 @@ func TestChallenge2Unaffected(t *testing.T) {
 	// JOIN 100
 	cfg.join(0)
 
-	// Do a bunch of puts to keys in all Shards
+	// Do a bunch of puts to keys in all migrating
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple Shards
+		ka[i] = strconv.Itoa(i) // ensure multiple migrating
 		va[i] = "100"
 		ck.Put(ka[i], va[i])
 	}
@@ -856,7 +856,7 @@ func TestChallenge2Unaffected(t *testing.T) {
 	// JOIN 101
 	cfg.join(1)
 
-	// QUERY to find Shards now owned by 101
+	// QUERY to find migrating now owned by 101
 	c := cfg.mck.Query(-1)
 	owned := make(map[int]bool, n)
 	for s, gid := range c.Shards {
@@ -898,7 +898,7 @@ func TestChallenge2Unaffected(t *testing.T) {
 }
 
 //
-// optional test to see whether servers can handle operations on Shards that
+// optional test to see whether servers can handle operations on migrating that
 // have been received as a part of a config migration when the entire migration
 // has not yet completed.
 //
@@ -916,17 +916,17 @@ func TestChallenge2Partial(t *testing.T) {
 	// Give the implementation some time to reconfigure
 	<-time.After(1 * time.Second)
 
-	// Do a bunch of puts to keys in all Shards
+	// Do a bunch of puts to keys in all migrating
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
-		ka[i] = strconv.Itoa(i) // ensure multiple Shards
+		ka[i] = strconv.Itoa(i) // ensure multiple migrating
 		va[i] = "100"
 		ck.Put(ka[i], va[i])
 	}
 
-	// QUERY to find Shards owned by 102
+	// QUERY to find migrating owned by 102
 	c := cfg.mck.Query(-1)
 	owned := make(map[int]bool, n)
 	for s, gid := range c.Shards {
@@ -937,8 +937,8 @@ func TestChallenge2Partial(t *testing.T) {
 	cfg.ShutdownGroup(0)
 
 	// LEAVE 100 + 102
-	// 101 can get old Shards from 102, but not from 100. 101 should start
-	// serving Shards that used to belong to 102 as soon as possible
+	// 101 can get old migrating from 102, but not from 100. 101 should start
+	// serving migrating that used to belong to 102 as soon as possible
 	cfg.leavem([]int{0, 2})
 
 	// Give the implementation some time to start reconfiguration

@@ -1,140 +1,4 @@
-# 易理解的RAFT实现——lab2
-
-本文旨在讲述我的 raft 实现过程，本文所描述的系统设计降低了处理状态转化时的复杂性，易于理解。
-
-## 设计概要
-
-### Image记录server状态
-
-raft 的难点之一在于正确处理并发情况下的状态转化，为了解决这个问题本文采用的方法是将所有的状态转化代码交由同一个协程执行，实现当中**`ticker`协程用来监听所有可能更新server状态的事件**，做出相应的处理。
-
-raft 将所有的 server 划分为三类：Follower、Candidate、Leader 位于不同状态时具有不同的行为——创建工作协程处理RPC请求与响应，当 server 的状态发生改变时原来工作协程所做出的处理都应该是无效的，所以在响应/发出 RPC 之前都应该判断 server 的状态是否发生改变。如何判断 server 的状态是否改变？最简单的想法就是在工作协程创建伊始保存 server 的状态，紧接着执行相应的逻辑处理，在响应/发出 RPC 之前再查询 server 的状态进行比较，通过比较判断 server 状态是否发生改变；
-
-基于上述思想，本文在实现中设计了保存有 server 状态的数据结构 `Image` ，**创建工作协程时获取当前状态下 server 的`Image`实例，在响应/发出 RPC 之前通过判断该`image`实例是否仍有效来判断 server 的状态是否发生更改。**
-
-```go
-// 所有的角色
-const (
-	FOLLOWER  int = iota
-	CANDIDATE int = iota
-	LEADER    int = iota
-)
-
-type Image struct {
-
-	update chan func(i *Image)
-	did    chan signal
-	done chan signal
-
-    // servre的状态
-	CurrentTerm int
-	State       int
-	VotedFor    int
-    
-    // Image实例所属的server
-	*Raft
-}
-```
-
-`Image` 记录某一时刻 server 的状态；工作协程可以通过监听 `Image` 实例中的 `done` 管道判断 server 的状态是否改变，工作协程（在 `update` 函数中）通过关闭 `done` 管道以通知所有监听当前 `Image` 实例的工作协程放弃当前的任务；当工作协程需要更新 server 的状态，工作协程可以将 server 状态更新的方式通过 `Image` 实例中的`update`管道发送过去；`ticker` 协程通过监听 `update` 管道，来执行 `update` 函数更新server的状态；当 `ticker` 协程执行完 `update` 函数之后，向 `did` 管道发送信号通知等待的工作协程；
-
-事实上每个`Image`实例均与`done`绑定，如果`done`被关闭也就表明与其绑定的`Image` 实例已失效；因此当一个`Image`实例失效时我们只需要替换`done`就好，不需要再重新创建一个`Image`实例。
-
-`Image` 有如下两个方法：
-
-+ `Done() bool`：如果当前 Image 实例已经失效，如果已失效表明 server 的状态已经发生改变则返回`true`，否则返回`false`。
-+  `Update(act func(i *Image)) bool`：工作协程调用`Update`函数向与自己绑定的`Image`实例的`update` 管道传递更新 server 状态的函数 `act`；在发送之前需要先检查当前的`Image`示例是否已失效，则返回`false`；否则返回`true`。
-
-**当调用`Done`或者`Update`返回`false`，就表示server得状态已经改变，当前的`Image`实例已经失效。**
-
-```go
-func (image Image) Update(act func(i *Image)) bool {
-
-	// 判断image是否早已失效，1
-	select {
-	case <-image.done:
-		return false
-	default:
-		break
-	}
-
-	select {
-		// 判断image是否早已失效，2
-	case <-image.done:
-		return false
-		
-		// 发送更新server状态的函数，通知ticker协程更新server的状态
-	case image.update <- act: 
-		<-image.did	 // 发送成功后等待act函数执行完毕后返回
-		return true
-	}
-}
-
-// 工作协程通过判断done是否关闭，确定image是否已失效
-func (image Image) Done() bool {
-	select {
-	case <-image.done: 
-		return true
-	default:
-		return false
-	}
-}
-```
-
-在`Update`函数中有两个检查`image.done`是否关闭的逻辑，是因为`Update`函数需要同时监听两个管道，如果两个管道同时有数据流动那么`select`会随机选择一个分支执行，因此如果只有第二个`select`代码块，可能会发生意想不到的bug。
-
-### ticker监听改变server状态的事件
-
-![raft-图4](assets/raft-图4.png)
-
-由Image的结构可以看出本文所指的描述server状态的字段由：`CurrentTerm、VotedFor、State`；
-
-上图描述了server状态转换图，**可能**导致server状态转换的事件主要有
-
-1. 计时器超时
-2. 接收到Leader的的AE RPC(Append Entry RPC)请求，处理返回的AE RPC响应
-3. 接收到Candidate的RV RPC(Request Vote RPC)请求，处理返回的RV RPC响应
-4. server 宕机了
-
-上述事件的发生并不一定会更新server的状态，比如Leader的心跳计时器超时就不需要更新server状态，只需要发送AE RPC即可；上文说到`ticker`协程用来监听所有可能更新server状态的事件，也即上面列出的3类事件。
-
-本文通过`timer time.Timer`对象来模拟定时器，因此`ticker`协程首先要监听`timer.C`管道来确定是否发生了计时器超时事件；监听`dead`管道来确定server是否发生了宕机；对于AE RPC、RV RPC相关的事件发生时RPC会创建一个工作协程来处理，工作协程通过`Image.update`管道传递server状态的更新函数，因此`ticker`协程还需要监听`image.update`管道。
-
-至此我们已经能够搭建起一个核心的框架了：
-
-```go
-func (rf *Raft) ticker() {
-
-	for {
-		select {
-		case <-rf.dead:
-			// 记得关闭协程，避免内存泄露
-			return
-		case f := <-rf.Image.update:
-			// 执行工作协程创建的更新函数
-		case <-rf.timer.C:
-			// 如果是选举计时器超时就转为Candidate，并重置选举计时器
-             // 如果心跳计时器超时，不需要改变状态
-		}
-
-        // 状态转变时进行持久化
-		rf.persist()
-
-		// 根据不同的状态执行后续动作
-		switch rf.State {
-		case FOLLOWER:
-		case CANDIDATE:
-			rf.sendRequestVote()
-		case LEADER:
-			rf.SendAppendEntries()
-		}
-	}
-}
-```
-
-在`select`代码块中进行server状态的改变，**强调这里是唯一会改变server状态的地方**，然后在`switch case`代码块中根据不同的server状态执行不同的后续代码。
-
-
+# basic raft的代码实现
 
 ## Raft结构体
 
@@ -148,7 +12,7 @@ type Raft struct {
 
     // Image、RWLog都必须是指针类型，因为部分工作协程会修改这两个属性的字段
     // 如果是值类型且没有额外操作的话，会丢失这些修改
-   *Image	// server的状态: CurrentTerm、State、VotedFor
+   *Image	// raft的状态: CurrentTerm、State、VotedFor
    *RWLog	
    timer 	   *time.Timer
    commitIndex int
@@ -186,11 +50,11 @@ type ApplyMsg struct {
 }
 ```
 
-为了降低锁的粒度，raft中用的都是读写锁，无论是读写server状态还是读写日志，都是读多写少，因此使用读写锁可以提高性能。
+为了降低锁的粒度，raft中用的都是读写锁，无论是读写raft状态还是读写日志，都是读多写少，因此使用读写锁可以提高性能。
 
 ## Raft的创建与持久化
 
-测试代码通过调用`Make`来创建或者重新启动一个raft实例，如果是server宕机之后重新恢复server需要从`persister`对象中反序列化自己的`CurrentTerm、VotedFor、Log`字段；server需要在状态更新、添加日志和日志压缩后及时进行持久化。
+测试代码通过调用`Make`来创建或者重新启动一个raft实例，如果是raft宕机之后重新恢复raft需要从`persister`对象中反序列化自己的`CurrentTerm、VotedFor、Log`字段；raft需要在状态更新、添加日志和日志压缩后及时进行持久化。
 
 ### Make
 
@@ -289,9 +153,9 @@ func (rf *Raft) readPersist() {
 }
 ```
 
-## ticker改变server状态
+## ticker更新raft状态
 
-根据*设计概要*中的分析`ticker`协程是整个实现中唯一改变server状态的协程；`ticker`监听到`server`宕机之后会关闭信号管道通知工作协程退出，避免协程因阻塞在管道中而发生内存泄漏；`ticker`监听到定时器超时之后，会更新server的状态，重置计时器以及发送RPC等；`ticker`监听到工作协程发来的`update`函数后，会执行`update`函数更新server的状态，并根据server的当前状态执行不同的逻辑。
+根据*设计概要*中的分析`ticker`协程是整个实现中唯一改变raft状态的协程；`ticker`监听到`raft`宕机之后会关闭信号管道通知工作协程退出，避免协程因阻塞在管道中而发生内存泄漏；`ticker`监听到定时器超时之后，会更新raft的状态，重置计时器以及发送RPC等；`ticker`监听到工作协程发来的`update`函数后，会执行`update`函数更新raft的状态，并根据raft的当前状态执行不同的逻辑。
 
 ### Kill & killed
 
@@ -315,7 +179,7 @@ func (rf *Raft) killed() bool {
 
 ### timer
 
-Raft 结构体中定一个了个`timer *time.Timer`成员用来模拟定时器，定时器超时后runtime系统会向`timer.C`管道中发送一个信号，`ticker`协程监听到信号之后只要server没有宕机就需要重置定时器；如果server是Follower、Candidate就需要随机设置一个选举时间，如果server是Leader就将倒计时设置为心跳时间
+Raft 结构体中定一个了个`timer *time.Timer`成员用来模拟定时器，定时器超时后runtime系统会向`timer.C`管道中发送一个信号，`ticker`协程监听到信号之后只要raft没有宕机就需要重置定时器；如果raft是Follower、Candidate就需要随机设置一个选举时间，如果raft是Leader就将倒计时设置为心跳时间
 
 ```go
 const HEARTBEAT = 100 * time.Millisecond
@@ -351,7 +215,7 @@ func (rf *Raft) resetTimer() {
 
 1. 心跳间隔很重要。测试要求1S内发送不超过10次心跳，所以`HEARTBEAT`最小是100ms；增大HEARTBEAT会降低发送心跳的频率，一般情况下不超过选举时间没问题；然而当网络不稳定时心跳有可能会丢失在网络中，极端情况下一连数个心跳因网络问题没有发送到Follower，这可能导致Follower发起一轮选举。
 
-2. 选举时间的范围也很重要。类似的问题，首先测试要求最长5s内要完成leader选举，因此选举时间不易过大；其次如果选举时间过小，当心跳丢失在网络中时Follower极有可能发起一轮选举；然后，为了在不稳定的网络环境中尽可能避免瓜分选票的发生，每个server的选举时间不能够太集中，也就是随机范围尽可能大；
+2. 选举时间的范围也很重要。类似的问题，首先测试要求最长5s内要完成leader选举，因此选举时间不易过大；其次如果选举时间过小，当心跳丢失在网络中时Follower极有可能发起一轮选举；然后，为了在不稳定的网络环境中尽可能避免瓜分选票的发生，每个raft的选举时间不能够太集中，也就是随机范围尽可能大；
 
    如果没有设置好心跳间隔和选举时间的范围，在`TestFigure8Unreliable2C`中极端不稳定的网络环境下可能产生**活锁**问题，即长时间无法选出`Leader`。
 
@@ -361,7 +225,7 @@ func (rf *Raft) resetTimer() {
 
 ### ticker
 
-关于工作协程如何处理RPC请求、响应将在对应的Leader选举，日志复制章节内讲解；目前只需知道工作协程通过向与server绑定的`Image`实例中的`Image.update`管道中传递`update`函数，来通知`ticker`协程更新server状态即可。至此已经介绍完了`ticker`需要监听的所有事件，下面给出的是`ticker`协程的完整实现：
+关于工作协程如何处理RPC请求、响应将在对应的Leader选举，日志复制章节内讲解；目前只需知道工作协程通过向与raft绑定的`Image`实例中的`Image.update`管道中传递`update`函数，来通知`ticker`协程更新raft状态即可。至此已经介绍完了`ticker`需要监听的所有事件，下面给出的是`ticker`协程的完整实现：
 
 ```go
 func (rf *Raft) ticker() {
@@ -374,12 +238,12 @@ func (rf *Raft) ticker() {
 			rf.timer.Stop()
 			rf.commitCh <- -1 // 关闭commit协程，避免内存泄漏
 			return
-		case f := <-rf.Image.update: // 工作协程通知ticker协程更新server状态
-			rf.mu.Lock()             // 更新server状态时申请写锁，避免读写冲突
-			f(rf.Image)              // 更新server状态，可能会重置计时器
+		case f := <-rf.Image.update: // 工作协程通知ticker协程更新raft状态
+			rf.mu.Lock()             // 更新raft状态时申请写锁，避免读写冲突
+			f(rf.Image)              // 更新raft状态，可能会重置计时器
 			rf.Image.did <- signal{} // 通知工作协程，update函数已执行
 
-			// 当server从其他状态变为leader时，初始化matchIndex、nextIndex
+			// 当raft从其他状态变为leader时，初始化matchIndex、nextIndex
 			if rf.Image.State == LEADER {
 				rf.nextIndex = make([]int, len(rf.peers))
 				rf.matchIndex = make([]int, len(rf.peers))
@@ -394,12 +258,12 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 		case <-rf.timer.C:
 			rf.mu.Lock()
-			// 选举计时器超时，server的状态转化为CANDIDATE
+			// 选举计时器超时，raft的状态转化为CANDIDATE
 			if rf.State != LEADER {
 				rf.State = CANDIDATE
 				rf.CurrentTerm++
 				rf.VotedFor = rf.me
-				// server的状态发生改变，原来的Image虽之失效
+				// raft的状态发生改变，原来的Image虽之失效
 				Debug(dTimer, "[%d] S%d CLOSE image.done", rf.CurrentTerm, rf.me)
 				close(rf.Image.done)
 				rf.Image.done = make(chan signal)
@@ -424,9 +288,9 @@ func (rf *Raft) ticker() {
 }
 ```
 
-`ticker`执行在一个`for`循环中，除非server宕机否则永远不会停止；ticker协程就做三件事更新server状态，重置计时器，根据server的状态执行后续动作。
+`ticker`执行在一个`for`循环中，除非raft宕机否则永远不会停止；ticker协程就做三件事更新raft状态，重置计时器，根据raft的状态执行后续动作。
 
-这里再次重申**`rf.mu.Lock()`与`rf.mu.Unlock()`之间是整个设计中唯一修改server状态的代码**，当在工作协程中读取server的状态时首先要申请`rf.mu`读锁，如果工作协程获得了读锁`ticker`协程对server状态更新的操作就会阻塞在`rf.mu`的写锁上。
+这里再次重申**`rf.mu.Lock()`与`rf.mu.Unlock()`之间是整个设计中唯一修改raft状态的代码**，当在工作协程中读取raft的状态时首先要申请`rf.mu`读锁，如果工作协程获得了读锁`ticker`协程对raft状态更新的操作就会阻塞在`rf.mu`的写锁上。
 
 接下来的任务就是完成Leader选举，日志复制。
 
@@ -460,7 +324,7 @@ type RequestVoteReply struct {
 2. 创建计票协程
 3. 向其它的peers发送RV RPC，并将响应结果发送到计票协程中
 
-在`VotesCounter`协程中为了保证计票结果得正确性，在获得半数赞成票之前`votesCounter`协程需要统计所有的票才能退出，所以无论是否为有效票都要将`RequestVoteReply`发送给`votesCounter`；另一点需要注意的是，server 只要获得绝大多数peers的赞成票就可以宣布当选为Leader，因此当server的状态转变之后可以提前宣布选举结束，以减少RPC的数量。
+在`VotesCounter`协程中为了保证计票结果得正确性，在获得半数赞成票之前`votesCounter`协程需要统计所有的票才能退出，所以无论是否为有效票都要将`RequestVoteReply`发送给`votesCounter`；另一点需要注意的是，raft 只要获得绝大多数peers的赞成票就可以宣布当选为Leader，因此当raft的状态转变之后可以提前宣布选举结束，以减少RPC的数量。
 
 ```go
 func (rf *Raft) sendRequestVote() {
@@ -486,28 +350,28 @@ func (rf *Raft) sendRequestVote() {
 
 	// 开始选举
 	Debug(dVote, "[%d] S%d SEND RV RPC", image.CurrentTerm, rf.me)
-	for server := range rf.peers {
-		if server == rf.me {
+	for raft := range rf.peers {
+		if raft == rf.me {
 			continue
 		}
-		go func(server int) {
+		go func(raft int) {
 			reply := new(RequestVoteReply)
 
 			// 选举提前结束
 			if image.Done() {
 				// 使得votesCounter协程正常关闭，避免内存泄漏
 				// votesCounter 必须接受到足够的选票（无论是否有效的）才会关闭
-				reply.ID = server
+				reply.ID = raft
 				replysCh <- reply
 				return
 			}
 
-			rf.peers[server].Call("Raft.RequestVote", args, reply)
-			reply.ID = server
+			rf.peers[raft].Call("Raft.RequestVote", args, reply)
+			reply.ID = raft
 
 			// 无论选票是否有效都要交给计票协程，目的是让计票协程能够正确返回
 			replysCh <- reply
-		}(server)
+		}(raft)
 	}
 }
 ```
@@ -516,18 +380,18 @@ func (rf *Raft) sendRequestVote() {
 
 如何统一的处理一轮选举所有的选票呢，简化并发问题最简单有效的方法就是将其串行化。具体实现就是将所有选票结果通过管道交给`votesCounter`协程，`votesCounter`协程逐个处理。这里需要强调的是`votesCounter`协程必须在发送RV RPC之前运行，因为协程的调度是不可控的，如果不做这个限制，`votesCounter`协程可能会错失掉部分选票结果。
 
-处理过程中，对于无效票计票协程只增加总票数即可，对于反对票如果过反对票的`term>currentTerm`server需要将自己转换为Follower并重置选举计时器；如果赞成票的数目达到其它peers数目的一半，server就可以转化为Leader。
+处理过程中，对于无效票计票协程只增加总票数即可，对于反对票如果过反对票的`term>currentTerm`raft需要将自己转换为Follower并重置选举计时器；如果赞成票的数目达到其它peers数目的一半，raft就可以转化为Leader。
 
-正如*设计概要*中所言，在处理过程中我们必须判断server的状态是否已改变，若是就没必要再执行下去了；但是在`votesCounter`协程中不能简单的退出，因为其它的选票结果人会通过`replyCh`发送过来，如果直接退出会导致发送协程的阻塞。
+正如*设计概要*中所言，在处理过程中我们必须判断raft的状态是否已改变，若是就没必要再执行下去了；但是在`votesCounter`协程中不能简单的退出，因为其它的选票结果人会通过`replyCh`发送过来，如果直接退出会导致发送协程的阻塞。
 
 下面给出`votesCounter`的实现：
 
 ```go
 // 用来计票的工作协程
-// image	创建工作协程时server的状态
+// image	创建工作协程时raft的状态
 // replyCh 	接受其它peers的投票结果
 func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
-	servers := len(image.peers)
+	rafts := len(image.peers)
 	done := make(chan signal)
 	go func() {
 		done <- signal{} // 计票协程已经开始执行了，告知raft发送RV RPC
@@ -538,7 +402,7 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 		for reply := range replyCh {
 			n++ // 获得一张选票
 
-			// 如果server的状态已经发生改变，就不用继续处理了
+			// 如果raft的状态已经发生改变，就不用继续处理了
 			// 但是不能直接退出协程，不然向replyCh发送选票的协程会被阻塞
 			if image.Done() {
 				goto check	// 判断是否已经收到所有的选票
@@ -550,7 +414,7 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 				// 获得一张反对票
 				if !reply.VoteGranted {
 					if reply.Term > image.CurrentTerm {
-						// server应该转为follower
+						// raft应该转为follower
 						image.Update(func(i *Image) {
 
 							// 设置新的Image
@@ -570,14 +434,14 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 
 				// 获得一张赞成票
 				agree++
-				if agree+1 > servers/2 {
+				if agree+1 > rafts/2 {
 					// 通知ticker协程将serve的状态更新为leader
                       // 只有当前的Image实例有效时，更新函数才会执行
 					image.Update(func(i *Image) {
 						// 设置新的Image
 						i.State = LEADER
 
-						// 因为需要改变server的状态，所以应该使之前的Image实例失效
+						// 因为需要改变raft的状态，所以应该使之前的Image实例失效
 						close(i.done)
 						// 重新绑定一个image.don就能使新Image实例生效
 						i.done = make(chan signal)
@@ -589,7 +453,7 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 				}
 			}
 		check:
-			if n == servers-1 { // 落选
+			if n == rafts-1 { // 落选
 				break
 			}
 		}
@@ -598,31 +462,31 @@ func votesCounter(image Image, replyCh <-chan *RequestVoteReply) <-chan signal {
 }
 ```
 
-至此我们看到了如何使用`Image`实例来简单的判断server的状态是否发生改变。
+至此我们看到了如何使用`Image`实例来简单的判断raft的状态是否发生改变。
 
 ### RequestVote
 
-每当server收到RV RPC请求后都会创建`RequestVote`协程处理RPC请求，检查选举条件。在处理过程中server的状态可能会发生改变，处理这种情况的一个基本原则：**如果创建协程时刻RPC参数不满足选举条件应直接返回投反对票，但是创建协程时RPC请求参数满足选举条件并不能直接投赞成票，因为在投票之前server的状态可能已经转变了，此时的选票应该是无效的。**在实现过程中，能看到`Image`数据结构带来的便利性。
+每当raft收到RV RPC请求后都会创建`RequestVote`协程处理RPC请求，检查选举条件。在处理过程中raft的状态可能会发生改变，处理这种情况的一个基本原则：**如果创建协程时刻RPC参数不满足选举条件应直接返回投反对票，但是创建协程时RPC请求参数满足选举条件并不能直接投赞成票，因为在投票之前raft的状态可能已经转变了，此时的选票应该是无效的。**在实现过程中，能看到`Image`数据结构带来的便利性。
 
 根据论文可知，`RequestVote`做如下检查：
 
 1. 如果Candidate的`term`已经过时了，立即返回`false`。
 
-2. 如果Candidate的`term`比较新，server应该转换为Follower；但是不应该重置定时器，论文中提到server在确保投票后才会重置定时器。根据《students’ guide》的描述，此时如果重置定时器的话，会导致很多不满足选举条件的server发起选举从而导致具有选举条件的server无法完成选举；换句话说，如果随意地重置定时器。
+2. 如果Candidate的`term`比较新，raft应该转换为Follower；但是不应该重置定时器，论文中提到raft在确保投票后才会重置定时器。根据《students’ guide》的描述，此时如果重置定时器的话，会导致很多不满足选举条件的raft发起选举从而导致具有选举条件的raft无法完成选举；换句话说，如果随意地重置定时器。
 
 3. 如果满足限制选举条件就投赞成票；否则投反对票。
 
    限制选举条件：
 
    + 如果Candidate的最后的日志条目Term更大，投赞成票
-   + 如果Term一样大，Candidate的日志更长或者和server的日志一样长，投赞成票
+   + 如果Term一样大，Candidate的日志更长或者和raft的日志一样长，投赞成票
 
 ```go
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
    // 这里加锁可以保证Image实例和lastEntry的一致性
    rf.mu.RLock()
-   // 获取server当前状态的镜像
+   // 获取raft当前状态的镜像
    image := *rf.Image
    rf.RWLog.mu.RLock()
    lastEntry := rf.RWLog.Log[len(rf.Log)-1]
@@ -651,7 +515,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
       return
    }
 
-   // CANDIDATE.term比较新，任何SERVER都应该更新自己的term；
+   // CANDIDATE.term比较新，任何raft都应该更新自己的term；
    // 但是不一定会投票还应进行限制选举条件的检查
    if term > currentTerm {
 
@@ -673,7 +537,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
          votedFor = image.VotedFor
          Debug(dVote, "[%d] S%d CONVERT FOLLOWER <- S%d, NEW TERM", term, rf.me, candidateID)
       })
-      // server状态已经发生了改变
+      // raft状态已经发生了改变
       if !reply.Valid {
          return
       }
@@ -689,11 +553,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
    // 满足限制选举条件，投出赞成票并重置计时器
    // 如果Candidate的最后的日志条目Term更大，投赞成票
-   // 如果Term一样大，Candidate的日志更长或者和server的日志一样长，投赞成票
+   // 如果Term一样大，Candidate的日志更长或者和raft的日志一样长，投赞成票
 
    if args.LastLogTerm > lastLogTerm || (args.LastLogIndex >= lastLogIndex && args.LastLogTerm == lastLogTerm) {
       reply.VoteGranted = true
-      // 注意赞成票只有在server状态没有发生改变时才有效
+      // 注意赞成票只有在raft状态没有发生改变时才有效
       reply.Valid = image.Update(func(i *Image) {
 
          // 设置新的Image实例
@@ -722,7 +586,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 ### start
 
-`start`接受客户端的请求，将请求打包成日志条目添加到日志中并最终同步到每一个server中。只有Leader能够接受客户端的请求，如果一个客户端通过`start`将请求发送给一个非Leader的server，`start`应立即返回:
+`start`接受客户端的请求，将请求打包成日志条目添加到日志中并最终同步到每一个raft中。只有Leader能够接受客户端的请求，如果一个客户端通过`start`将请求发送给一个非Leader的raft，`start`应立即返回:
 
 ```go
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -816,7 +680,7 @@ func (rf *Raft) calculateCommitIndex() {
             count++
          }
       }
-      // 找到首个大多数server均接受的日志条目时就不用再向前找了
+      // 找到首个大多数raft均接受的日志条目时就不用再向前找了
       if count >= len(rf.peers)/2 {
          break
       }
@@ -845,7 +709,7 @@ func (rf *Raft) calculateCommitIndex() {
 }
 ```
 
-这里有一处对于`matchIndex`的读写冲突，在处理AE(AppendEntey) RPC的响应时可能会并发地更新`matchIndex`，但是这并不影响正确性：在server状态不变的前提下`commitIndex`是单调增长的，即时发生了读写冲突也仅仅是延缓了日志提交的时间，但绝不会重复提交日志；另一方面Leader绝不会删除或修改自己的日志。综上对`matchIndex`的读写冲突不会影响正确性。
+这里有一处对于`matchIndex`的读写冲突，在处理AE(AppendEntey) RPC的响应时可能会并发地更新`matchIndex`，但是这并不影响正确性：在raft状态不变的前提下`commitIndex`是单调增长的，即时发生了读写冲突也仅仅是延缓了日志提交的时间，但绝不会重复提交日志；另一方面Leader绝不会删除或修改自己的日志。综上对`matchIndex`的读写冲突不会影响正确性。
 
 可能有读者觉得`commitIndex`也可能存在读写冲突，事实上并没有。Leader只会在`calculateCommitIndex`函数内更新`commitIndex`，而`calculateCommitIndex`在ticker协程内被调用，它是串行执行的；另外一处更新`commitIndex`的地方是在收到AE RPC添加了日志之后，但是添加日志之前需要修改状态，修改状态的代码也发生在`ticker`协程中，也就是说Leader不可能同时执行`calculateCommitIndex`和更新自己的状态。综上所述，`commitIndex`的更新不存在读写冲突。
 
@@ -858,16 +722,16 @@ func (rf *Raft) SendAppendEntries() {
 	image := *rf.Image        // 获取此时的Image实例
 	rf.calculateCommitIndex() // 更新commitIndex
 	Debug(dAppend, "[%d] S%d SEND AE RPC.", rf.CurrentTerm, rf.me)
-	for server := range rf.peers {
-		if server == rf.me {
+	for raft := range rf.peers {
+		if raft == rf.me {
 			continue
 		}
 
 		// 记录下此时的nextIndex,matchIndex；
 		// 在收到RPC响应之后如果nextIndex,matchIndex发生改变，便无需更新nextIndex,matchIndex
 		var (
-			nextIndex  = rf.nextIndex[server]
-			matchIndex = rf.matchIndex[server]
+			nextIndex  = rf.nextIndex[raft]
+			matchIndex = rf.matchIndex[raft]
 		)
 
 		// 每一peer都有一个独立的AppendEntriesArgs实例
@@ -886,7 +750,7 @@ func (rf *Raft) SendAppendEntries() {
 		args.Log = append(rf.Log[:0:0], rf.Log[nextIndex:]...) // 深拷贝
 
 		rf.RWLog.mu.RUnlock()
-		go aerpc(image, server, nextIndex, matchIndex, args)
+		go aerpc(image, raft, nextIndex, matchIndex, args)
 	}
 }
 ```
@@ -895,7 +759,7 @@ func (rf *Raft) SendAppendEntries() {
 
 ### aerpc
 
-`aerpc`向标号为server的peer发送AE RPC，并处理后续响应。在接收到RPC响应之后，aerpc需要做以下检查：
+`aerpc`向标号为raft的peer发送AE RPC，并处理后续响应。在接收到RPC响应之后，aerpc需要做以下检查：
 
 1. 收到RPC响应之后应立即检查当前的`Image`实例是否有效，以及响应是否有效；如果`Image`实例失效，或者响应无效立即退出。
 
@@ -923,7 +787,7 @@ func (rf *Raft) SendAppendEntries() {
 
 ```go
 // Aerpc 向标号为peerIndex的peer发送AE RPC，并处理后续响应
-// image      发送RPC时server的Image实例
+// image      发送RPC时raft的Image实例
 // nextIndex   发送RPC时peer的nextIndex值
 // matchIndex  发送RPC时peer的matchIndex值
 // args          RPC参数
@@ -932,13 +796,13 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
    reply := new(AppendEntriesReply)
    image.peers[peerIndex].Call("Raft.AppendEntries", args, reply)
 
-   // 无效的响应，或者server的状态已经发生改变，就放弃当前的任务
+   // 无效的响应，或者raft的状态已经发生改变，就放弃当前的任务
    if image.Done() || !reply.Valid {
       return
    }
    Debug(dAppend, "[%d] S%d AE <-REPLY S%d, V:%v S:%v CLI:%d, CLT:%d", image.CurrentTerm, image.me, peerIndex, reply.Valid, reply.Success, reply.ConflictIndex, reply.ConflictTerm)
 
-   // server应该转为FOLLOWER，但不用重置计时器
+   // raft应该转为FOLLOWER，但不用重置计时器
    if reply.Term > image.CurrentTerm {
       image.Update(func(i *Image) {
 
@@ -988,9 +852,9 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
       return
    }
 
-	// 如果server的状态没有改变，更新peer的nextIndex、newMatchIndex值
+	// 如果raft的状态没有改变，更新peer的nextIndex、newMatchIndex值
    // 采用CAS的方式，保证并发情况下nextIndex、matchIndex的正确性
-   // 即使server的状态已经发生改变不再是leader，修改nextIndex、matchIndex也是无害的
+   // 即使raft的状态已经发生改变不再是leader，修改nextIndex、matchIndex也是无害的
    if !image.Done() && atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.nextIndex[peerIndex])), int64(nextIndex), int64(newNextIndex)) &&
       atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&image.matchIndex[peerIndex])), int64(matchIndex), int64(newMatchIndex)) {
       Debug(dAppend, "[%d] S%d UPDATE M&N -> S%d, MI:%d, NI:%d", image.CurrentTerm, image.me, peerIndex, newMatchIndex, newNextIndex)
@@ -1005,9 +869,9 @@ func aerpc(image Image, peerIndex int, nextIndex, matchIndex int, args *AppendEn
 `AppendEntries`主要执行如下操作：
 
 1. 如果Leader的`Term`过时了，立即返回。
-2. 否则当前的server应该转化为该Leader的Follower并重置自己的选举定时器；这里需要注意的是：如果当前的server一直是该Leader的Follower就不需要改变状态，否则就应该改变状态并使得之前的`Image`实例失效。
-3. 紧接着执行日志的一致性检查，再次强调如果检查不通过可以直接返回`false`，但是检查通过不能直接返回`true`，因为server的状态已经发生改变的话，检查时所用的`Image`实例就是过时的。
-4. 检查通过之后要添加日志，在添加日志中不光要申请日志的写锁避免产生对日志的读写冲突，还要保证server的状态不会发生改变，这个过程中申请server的读锁。
+2. 否则当前的raft应该转化为该Leader的Follower并重置自己的选举定时器；这里需要注意的是：如果当前的raft一直是该Leader的Follower就不需要改变状态，否则就应该改变状态并使得之前的`Image`实例失效。
+3. 紧接着执行日志的一致性检查，再次强调如果检查不通过可以直接返回`false`，但是检查通过不能直接返回`true`，因为raft的状态已经发生改变的话，检查时所用的`Image`实例就是过时的。
+4. 检查通过之后要添加日志，在添加日志中不光要申请日志的写锁避免产生对日志的读写冲突，还要保证raft的状态不会发生改变，这个过程中申请raft的读锁。
 5. 日志添加完成之后响应RPC之前要进行持久化操作。
 6. 最后可能需要更新`commitIndex`。为了保证并发修改`commitIndex`的正确性，这里同样采用CAS的方式。
 
@@ -1044,7 +908,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		i.CurrentTerm = term
 		i.VotedFor = leaderID
 
-		// 如果当前的server一直是该Leader的Follower就不需要改变状态，
+		// 如果当前的raft一直是该Leader的Follower就不需要改变状态，
 		// 否则就应该改变状态并使得之前的Image实例失效。
 		if !(term == currentTerm && image.State == FOLLOWER) {
 			close(i.done)              // 使旧的Image实例失效
@@ -1057,12 +921,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		i.resetTimer() // 重置计时器
 	})
 
-	// server的状态已经发生了改变
+	// raft的状态已经发生了改变
 	if !reply.Valid {
 		return
 	}
 
-	// 避免对rf.Log的读写冲突，但并不能保证server的状态不会发生改变
+	// 避免对rf.Log的读写冲突，但并不能保证raft的状态不会发生改变
 	rf.RWLog.mu.RLock()
 	var (
 		prevLogIndex = args.PrevLogIndex
@@ -1096,7 +960,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.RWLog.mu.RUnlock()
 		Debug(dAppend, "[%d] S%d REFUSE <- S%d, CONFLICT", currentTerm, me, leaderID)
 
-		// 如果server状态已经改变，上述数据是无效的
+		// 如果raft状态已经改变，上述数据是无效的
 		reply.Valid = !image.Done()
 		return
 	}
@@ -1105,8 +969,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 通过了日志的一致性检查，开始追加日志
 	reply.Success = true
 
-	// 要保证追加日志时server的状态没有发生改变，所以这里加读锁
-	// 如果不加锁server状态可能发生改变，有可能删除其它leader添加的已提交的日志
+	// 要保证追加日志时raft的状态没有发生改变，所以这里加读锁
+	// 如果不加锁raft状态可能发生改变，有可能删除其它leader添加的已提交的日志
 	rf.mu.RLock()
 	defer rf.mu.RUnlock()
 	reply.Valid = !image.Done()
@@ -1131,7 +995,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		var commitIndex int
 		commitIndex = int(atomic.LoadInt64((*int64)(unsafe.Pointer(&rf.commitIndex))))
 
-		// 因为申请了读锁，server的状态不会发生改变
+		// 因为申请了读锁，raft的状态不会发生改变
 		// 只有在commitIndex < newCommitIndex时才更新；使用CAS是为了保证并发安全
 		if commitIndex < newCommitIndex && atomic.CompareAndSwapInt64((*int64)(unsafe.Pointer(&rf.commitIndex)), int64(commitIndex), int64(newCommitIndex)) {
 
@@ -1186,7 +1050,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 ### applier
 
-`applier`协程用来按顺序提交所有已经同步的日志条目，在之前的代码中可以看到，只要server的`commitIndex`更新之后就应该将新的`commitIndex`通过`commitCh`传递给`applier`协程。applier协程不能重复提交同一个日志条目，因此每一个有效的`commitIndex`都不应该小于`lastApplied`，并且每提交一个日志条目都要增加`lastApplied`的值。
+`applier`协程用来按顺序提交所有已经同步的日志条目，在之前的代码中可以看到，只要raft的`commitIndex`更新之后就应该将新的`commitIndex`通过`commitCh`传递给`applier`协程。applier协程不能重复提交同一个日志条目，因此每一个有效的`commitIndex`都不应该小于`lastApplied`，并且每提交一个日志条目都要增加`lastApplied`的值。
 
 ```go
 func (rf *Raft) applier() {
@@ -1221,7 +1085,7 @@ type logTopic string
 const (
 	dClient  logTopic = "CLNT" // 客户端请求
 	dCommit  logTopic = "CMIT" // 提交日志
-	dKill    logTopic = "KILL" // server宕机
+	dKill    logTopic = "KILL" // raft宕机
 	dAppend  logTopic = "APET" // AE RPC
 	dPersist logTopic = "PERS" // 持久化操作
 	dTimer   logTopic = "TIMR" // 定时器操作
@@ -1298,7 +1162,7 @@ type ApplyMsg struct {
 
 在开始实现之前需要明确各个接口的交互是怎样的：
 
-1. 正常情况下，Follower与Leader的日志保持同步，但日志达到一定长度后测试代码会调用`Snapshot`要求`raft`删除`index`之前（包括）的日志，并且将日志、快照以及server的状态持久化保存；
+1. 正常情况下，Follower与Leader的日志保持同步，但日志达到一定长度后测试代码会调用`Snapshot`要求`raft`删除`index`之前（包括）的日志，并且将日志、快照以及raft的状态持久化保存；
 
 2. 在不稳定网络环境中，一个Follower可能落后Leader较多的日志，Leader首先需要找到与其匹配的日志条目并将该点以及以后的日志条目均发送过去。但是在搜索过程中，可能发现匹配的日志条目已经被删除加入到快照中了，此时Leader只需要将快照及其后续日志条目通过AE RPC发送过去即可。
 
@@ -1316,7 +1180,7 @@ type ApplyMsg struct {
 ```go
 type RWLog struct {
 	mu            sync.RWMutex
-	Log           []Entry // 如果当前的server有快照，那么快照一定是第一个日志条目
+	Log           []Entry // 如果当前的raft有快照，那么快照一定是第一个日志条目
 	SnapshotIndex int     // 当前快照的LastIncludeIndex，所有日志条目索引的基准
 }
 ```
@@ -1393,8 +1257,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 }
 ```
 
-
-
 ## 如何测试
 
 要求python3的环境，测试脚本是实验材料中给的python脚本。
@@ -1413,7 +1275,7 @@ python3 dstest.py -v  -p 20 -n 100 -o ./output [Tests]
 
 ```sh
 cd 6.824/raft
-# -c 输出的列数，即测试中servers的数目
+# -c 输出的列数，即测试中rafts的数目
 python3 dslog.py output/xxx.log -c 3
 ```
 

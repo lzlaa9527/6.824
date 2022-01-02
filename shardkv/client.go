@@ -4,7 +4,7 @@ package shardkv
 // client code to talk to a sharded key/DB service.
 //
 // the client first talks to the shardctrler to find out
-// the assignment of Shards (keys) to groups, and then
+// the assignment of migrating (keys) to groups, and then
 // talks to the group that holds the key's shard.
 //
 

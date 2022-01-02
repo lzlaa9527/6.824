@@ -84,24 +84,25 @@ type ReConfigReply struct {
 //
 // pullTasks使得server在迁移数据的同时向外提供服务。
 type PullTasks struct {
-	mu     *sync.RWMutex
-	tasks  map[int]TaskStruct
-	Shards map[int]bool // 正在数据迁移的shards
+	mu        *sync.RWMutex
+	tasks     map[int]TaskStruct
+	migrating map[int]bool // 正在数据迁移的shards
 
 }
 
+// 从ToGID拉取分片数据的任务
 type TaskStruct struct {
 	Cfgnum    int
 	ToGID     int
-	ToServers []string
+	ToServers []string	// for debug
 	Shards    []int
 }
 
 func NewTasks() PullTasks {
 	return PullTasks{
-		mu:     new(sync.RWMutex),
-		tasks:  make(map[int]TaskStruct),
-		Shards: make(map[int]bool),
+		mu:        new(sync.RWMutex),
+		tasks:     make(map[int]TaskStruct),
+		migrating: make(map[int]bool),
 	}
 }
 
@@ -111,7 +112,7 @@ func (t PullTasks) Add(ts TaskStruct) {
 
 	t.tasks[ts.ToGID] = ts
 	for _, sid := range ts.Shards {
-		t.Shards[sid] = true
+		t.migrating[sid] = true
 	}
 }
 
@@ -125,7 +126,7 @@ func (t PullTasks) Remove(gid int) {
 	}
 
 	for _, sid := range t.tasks[gid].Shards {
-		delete(t.Shards, sid)
+		delete(t.migrating, sid)
 	}
 	delete(t.tasks, gid)
 }
@@ -154,7 +155,7 @@ func (t PullTasks) Contains(shard int) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	_, existed := t.Shards[shard]
+	_, existed := t.migrating[shard]
 	return existed
 }
 
@@ -166,7 +167,7 @@ func (t PullTasks) Reset() {
 		delete(t.tasks, gid)
 	}
 
-	for sid := range t.Shards {
-		delete(t.Shards, sid)
+	for sid := range t.migrating {
+		delete(t.migrating, sid)
 	}
 }

@@ -297,7 +297,7 @@ func (kv *ShardKV) applier() {
 
 			// 避免重复执行同一个op
 			if ok, reply := kv.ITable.Executed(op.ID); ok {
-				kv.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.Replay)
+				kv.OpReplys.SetAndBroadcast(Index(index), op, reply)
 				continue
 			}
 
@@ -430,7 +430,7 @@ func (kv *ShardKV) applier() {
 			// 当applyMsg.Replay == false时说明该op是在server重启后提交的。
 			//
 			// 重启前提交的op需要被重放，但是不存在clerk协程等待server重启前提交的op。
-			kv.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.Replay)
+			kv.OpReplys.SetAndBroadcast(Index(index), op, reply)
 
 			// 通知raft进行snapshot
 			// 一定要在安装完快照之后才拍摄新的快照

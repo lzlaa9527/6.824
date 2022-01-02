@@ -157,7 +157,7 @@ func (kv *KVServer) applier() {
 
 			// 避免重复执行同一个op
 			if ok,reply:=kv.ITable.Executed(identifier);ok {
-				kv.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.Replay)
+				kv.OpReplys.SetAndBroadcast(Index(index), op, reply)
 				continue
 			}
 
@@ -176,11 +176,7 @@ func (kv *KVServer) applier() {
 			kv.ITable.UpdateIdentifier(identifier.ClerkID, identifier.Seq+1, reply)
 
 			// 唤醒等待op执行结果的clerk协程。
-			// 如果op.ServerID == kv.me说明该op是通过当前Server提交的，并且
-			// 当applyMsg.Replay == false时说明该op是在server重启后提交的。
-			//
-			// 重启前提交的op需要被重放，但是不存在clerk协程等待server重启前提交的op。
-			kv.OpReplys.SetAndBroadcast(Index(index), op, reply, op.ServerID == kv.me && !applyMsg.Replay)
+			kv.OpReplys.SetAndBroadcast(Index(index), op, reply)
 		}
 
 		// 通知raft进行snapshot

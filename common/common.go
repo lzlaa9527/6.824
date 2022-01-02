@@ -90,21 +90,15 @@ func (or OpReplys) WaitAndMatch(index int, reqOp Op) (interface{}, Err) {
 }
 
 // server 调用SetAndBroadcast唤醒所有等待i对应Op的工作协程(clerk)。
-// 如果目前还没有clerk等待该Op，且wake为false则直接返回；
-// 如果wake为true，说明存在clerk会等待该op的完成，因此需要创建并插入对应的OpResult，
-// 并且closer(ret.s)告知等待的clerk，该op已经完成
-func (or OpReplys) SetAndBroadcast(i Index, op Op, re interface{}, awake bool) {
-	if !awake {
-		return
-	}
+// 如果目前还没有clerk等待该Op，则直接返回；
+// 如果存在clerk会等待该op的完成，就closer(ret.s)告知等待的clerk，该op已经完成
+func (or OpReplys) SetAndBroadcast(i Index, op Op, re interface{}) {
 	or.mu.Lock()
 	defer or.mu.Unlock()
 
 	ret, ok := or.table[i]
 	if !ok { // 没有等待该Op的工作协程，直接返回
-		or.table[i] = new(SignalWithOpReply)
-		or.table[i].s = make(chan signal)
-		ret = or.table[i]
+		return
 	}
 
 	ret.op = op
